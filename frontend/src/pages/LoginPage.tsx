@@ -185,43 +185,7 @@ const styles = {
   },
 };
 
-interface LoginPageProps {
-  onCreateOrganization: () => void;
-}
-
-export default function LoginPage({
-  onCreateOrganization,
-}: LoginPageProps) {
-
-  <div
-  style={{
-    marginTop: "24px",
-    textAlign: "center",
-    color: "rgba(167, 199, 183, 0.6)",
-    fontSize: "13px",
-  }}
->
-  <span>Don't have an organization account? </span>
-
-  <button
-    type="button"
-    onClick={onCreateOrganization}
-    style={{
-      background: "none",
-      border: "none",
-      padding: 0,
-      color: "#4ade80",
-      fontSize: "13px",
-      fontWeight: 600,
-      cursor: "pointer",
-      fontFamily: "'Inter', sans-serif",
-    }}
-  >
-    Create Organization
-  </button>
-</div>
-
-
+export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -356,25 +320,6 @@ export default function LoginPage({
                 <ArrowRight size={18} />
               </>
             )}
-          </button>
-                    <button
-            type="button"
-            onClick={onCreateOrganization}
-            style={{
-              marginTop: "12px",
-              padding: "12px",
-              width: "100%",
-              background: "transparent",
-              border: "1px solid rgba(34, 197, 94, 0.3)",
-              borderRadius: "12px",
-              color: "#86efac",
-              fontSize: "14px",
-              fontWeight: 600,
-              cursor: "pointer",
-              fontFamily: "'Inter', sans-serif",
-            }}
-          >
-            Create Organization
           </button>
         </form>
 

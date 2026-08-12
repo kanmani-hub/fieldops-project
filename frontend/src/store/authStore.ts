@@ -31,11 +31,6 @@ interface AuthState {
   logout: () => Promise<void>;
   refreshTokens: () => Promise<boolean>;
   loadFromStorage: () => void;
-  authenticateWithTokens: (
-    accessToken: string,
-    refreshToken: string,
-    user: AuthUser
-  ) => void;
   clearError: () => void;
   updateUser: (updatedFields: Partial<AuthUser>) => void;
 }
@@ -88,25 +83,6 @@ const useAuthStore = create<AuthState>((set, get) => ({
       set({ isLoading: false, error: message, isAuthenticated: false });
       throw new Error(message);
     }
-  },
-    authenticateWithTokens: (
-    accessToken: string,
-    refreshToken: string,
-    user: AuthUser
-  ) => {
-    localStorage.setItem("access_token", accessToken);
-    localStorage.setItem("refresh_token", refreshToken);
-    localStorage.setItem("tenant_id", user.tenant_id);
-    localStorage.setItem("user", JSON.stringify(user));
-
-    set({
-      user,
-      accessToken,
-      refreshToken,
-      isAuthenticated: true,
-      isLoading: false,
-      error: null,
-    });
   },
 
   register: async (data: RegisterData) => {

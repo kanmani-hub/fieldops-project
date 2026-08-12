@@ -24,7 +24,6 @@ coverage.xml
 *.sqlite3
 
 # Environment variable files
-.env
 .env.*
 !.env.example
 
