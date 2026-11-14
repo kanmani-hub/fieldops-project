@@ -219,13 +219,7 @@ function normalizeStatus(status: string): string {
 function isActiveAssignment(job: TechnicianJob): boolean {
   const status = normalizeStatus(job.status).replace(/[ -]+/g, "_");
   return ![
-    // My Jobs is for accepted/work-in-progress jobs. Assignment cards remain
-    // available through the separate acceptance popup and must not leak in
-    // from an older offline cache while waiting for an accept or timeout.
-    "ASSIGNED",
-    "ACTIVE",
-    "PENDING",
-    "AWAITING_ACCEPTANCE",
+    // Pending offers remain visible in Assigned Jobs after their popup closes.
     "QUEUED",
     "PLANNED",
     "OFFERED",

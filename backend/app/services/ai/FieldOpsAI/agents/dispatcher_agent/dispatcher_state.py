@@ -40,6 +40,12 @@ class DispatcherState(TypedDict, total=False):
     # Dispatcher output
     next_action: str | None
     assigned_technician_id: int | None
+    auto_assignment_required: bool
+    auto_assignment_attempted: bool
+    auto_assigned_technician_id: int | None
+    auto_assignment_status: str | None
+
+
 
     # Planning control
     planning_required: bool

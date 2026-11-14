@@ -59,7 +59,7 @@ export function StatusBadge({ status }: { status: string | null | undefined }) {
     UNASSIGNED: { label: "UNASSIGNED", bg: colors.warningSoft, fg: colors.warning },
     QUEUED: { label: "UNASSIGNED", bg: colors.warningSoft, fg: colors.warning },
     ASSIGNED: { label: "AWAITING ACCEPTANCE", bg: colors.blueSoft, fg: colors.blue },
-    ACCEPTED: { label: "ASSIGNED", bg: colors.blueSoft, fg: colors.blue },
+    ACCEPTED: { label: "ACCEPTED", bg: colors.blueSoft, fg: colors.blue },
     EN_ROUTE: { label: "EN ROUTE", bg: colors.purpleSoft, fg: colors.purple },
     ON_SITE: { label: "IN PROGRESS", bg: colors.warningSoft, fg: colors.warning },
     IN_PROGRESS: { label: "IN PROGRESS", bg: colors.warningSoft, fg: colors.warning },

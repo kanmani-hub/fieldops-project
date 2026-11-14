@@ -89,6 +89,7 @@ import {
   isAwaitingAcceptance,
 } from "../../hooks/useAcceptanceCountdown";
 import TechnicianJobAssignmentPopup from "../../components/technician/TechnicianJobAssignmentPopup";
+import TechnicianForceAssignPopup from "../../components/technician/TechnicianForceAssignPopup";
 import {
   isValidTechnicianGpsFix,
   useTechnicianGpsStore,
@@ -424,6 +425,22 @@ const normalizeStatus = (status: unknown): string =>
 
   String(status ?? "").trim().toUpperCase();
 
+const assignmentPopupKey = (job: any): string =>
+  `${String(job?.id ?? "")}@${String(job?.assigned_at ?? "")}`;
+
+const popupDismissalStorageKey = (user: any): string =>
+  `technician.assignment-popup-dismissals:${user?.tenant_id ?? "unknown"}:${user?.id ?? user?.user_id ?? "unknown"}`;
+
+const readDismissedPopupKeys = (storageKey: string): Set<string> => {
+  try {
+    const stored = window.localStorage.getItem(storageKey);
+    const parsed = JSON.parse(stored || "[]");
+    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+  } catch {
+    return new Set();
+  }
+};
+
 const getStatusLabel = (status: unknown): string => {
   const normalized = normalizeStatus(status).replace(/[-\s]+/g, "_");
   switch (normalized) {
@@ -563,7 +580,15 @@ const getJobScheduleKey = (job: any): string => {
 };
 
 const isJobSequenceStartAllowed = (job: any, jobs: any[]): boolean => {
-  if (typeof job?.can_start === "boolean") return job.can_start;
+  // Force-assigned jobs do not require technician acceptance. Their start
+  // eligibility is determined by the scheduled-job sequence instead.
+  if (
+    typeof job?.can_start === "boolean" &&
+    job?.assigned_by !== "SYSTEM_FORCE_ASSIGNMENT"
+  ) {
+    return job.can_start;
+  }
+
   const earliestOpenJob = jobs
     .filter((candidate) => !TERMINAL_JOB_STATUSES.includes(normalizeStatus(candidate.status)))
     .slice()
@@ -609,8 +634,10 @@ export default function TechnicianJobsPage() {
   const [liveJob, setLiveJob] = useState<any | null>(null);
 
   const [assignedPopupJob, setAssignedPopupJob] = useState<any | null>(null);
+  const [forceAssignedPopupJob, setForceAssignedPopupJob] = useState<any | null>(null);
 
   const authUser = useAuthStore((state) => state.user);
+  const popupStorageKey = popupDismissalStorageKey(authUser);
   const technicianGpsLocation = useTechnicianGpsStore(
     (state) => state.location,
   );
@@ -619,9 +646,31 @@ export default function TechnicianJobsPage() {
 
   const [messageJobId, setMessageJobId] = useState<number | null>(null);
 
-  const assignedPopupJobIdRef = useRef<number | null>(null);
+  const assignedPopupJobIdRef = useRef<string | null>(null);
 
-  const rejectedPopupJobIdsRef = useRef<Set<number>>(new Set());
+  const rejectedPopupJobIdsRef = useRef<Set<string>>(readDismissedPopupKeys(popupStorageKey));
+  const dismissedForceAssignedJobIdsRef = useRef<Set<string>>(readDismissedPopupKeys(popupStorageKey));
+
+  useEffect(() => {
+    const dismissed = readDismissedPopupKeys(popupStorageKey);
+    rejectedPopupJobIdsRef.current = new Set(dismissed);
+    dismissedForceAssignedJobIdsRef.current = new Set(dismissed);
+  }, [popupStorageKey]);
+
+  const rememberPopupDismissal = (job: any, forceAssigned = false) => {
+    const key = assignmentPopupKey(job);
+    const target = forceAssigned ? dismissedForceAssignedJobIdsRef : rejectedPopupJobIdsRef;
+    target.current.add(key);
+    try {
+      const allDismissed = new Set([
+        ...rejectedPopupJobIdsRef.current,
+        ...dismissedForceAssignedJobIdsRef.current,
+      ]);
+      window.localStorage.setItem(popupStorageKey, JSON.stringify([...allDismissed].slice(-200)));
+    } catch {
+      // Keep the dismissal for this page session if browser storage is unavailable.
+    }
+  };
 
   const countdownJobs =
     assignedPopupJob &&
@@ -635,29 +684,34 @@ export default function TechnicianJobsPage() {
   const legacyTimerSeconds = timerSeconds ?? 0;
 
   const checkForAssignedJob = async () => {
-    // Never show the assignment popup while the rejection dialog is open.
-    if (rejectModal !== null) return;
+    if (rejectModal !== null || forceAssignedPopupJob || assignedPopupJob) return;
 
     try {
       const response = await getTechnicianJobOffers();
       const list = Array.isArray(response?.data) ? response.data : [];
 
-      const assignedJob = list.find((job: any) => {
-        const jobId = Number(job?.id);
+      const forceAssigned = list.find((job: any) =>
+        job?.assigned_by === "SYSTEM_FORCE_ASSIGNMENT" &&
+        !dismissedForceAssignedJobIdsRef.current.has(assignmentPopupKey(job))
+      );
+      if (forceAssigned) {
+        setForceAssignedPopupJob(forceAssigned);
+        return;
+      }
 
-        return (
-          isAwaitingAcceptance(job) &&
-          !rejectedPopupJobIdsRef.current.has(jobId)
-        );
-      });
+      const normalOffer = list.find((job: any) =>
+        job?.assigned_by !== "SYSTEM_FORCE_ASSIGNMENT" &&
+        isAwaitingAcceptance(job) &&
+        !rejectedPopupJobIdsRef.current.has(assignmentPopupKey(job))
+      );
 
-      if (!assignedJob) return;
+      if (!normalOffer) return;
 
-      const jobId = Number(assignedJob.id);
+      const jobId = assignmentPopupKey(normalOffer);
       if (assignedPopupJobIdRef.current === jobId) return;
 
       assignedPopupJobIdRef.current = jobId;
-      setAssignedPopupJob(assignedJob);
+      setAssignedPopupJob(normalOffer);
     } catch (error) {
       console.error("Failed to check assigned job:", error);
     }
@@ -673,7 +727,26 @@ export default function TechnicianJobsPage() {
       ]);
       const list = Array.isArray(jobsResponse?.data) ? jobsResponse.data : [];
       const offers = Array.isArray(offersResponse?.data) ? offersResponse.data : [];
-      const orderedJobs = list.slice().sort((first, second) =>
+
+      const jobsById = new Map<number, any>();
+      for (const job of list) {
+        if (job?.id !== undefined && job?.id !== null) {
+          jobsById.set(Number(job.id), job);
+        }
+      }
+      for (const job of offers) {
+        if (job?.id !== undefined && job?.id !== null) {
+          if (job?.assigned_by !== "SYSTEM_FORCE_ASSIGNMENT" && !isAwaitingAcceptance(job)) continue;
+          const existing = jobsById.get(Number(job.id));
+          jobsById.set(Number(job.id), {
+            ...existing,
+            ...job,
+            status: job?.assigned_by === "SYSTEM_FORCE_ASSIGNMENT" ? job.status : "ASSIGNED",
+          });
+        }
+      }
+
+      const orderedJobs = Array.from(jobsById.values()).sort((first, second) =>
         getJobScheduleKey(first).localeCompare(getJobScheduleKey(second)) ||
         Number(first.id) - Number(second.id)
       );
@@ -689,17 +762,28 @@ export default function TechnicianJobsPage() {
         return;
       }
 
-      const pendingAssigned = offers.find((job: any) => {
-        const jobId = Number(job?.id);
+      const forceAssigned = offers.find((job: any) =>
+        job?.assigned_by === "SYSTEM_FORCE_ASSIGNMENT" &&
+        !dismissedForceAssignedJobIdsRef.current.has(assignmentPopupKey(job))
+      );
+      if (forceAssigned) {
+        setAssignedPopupJob(null);
+        assignedPopupJobIdRef.current = null;
+        setForceAssignedPopupJob(forceAssigned);
+        return;
+      }
 
+      const pendingAssigned = offers.find((job: any) => {
+        const popupKey = assignmentPopupKey(job);
         return (
+          job?.assigned_by !== "SYSTEM_FORCE_ASSIGNMENT" &&
           isAwaitingAcceptance(job) &&
-          !rejectedPopupJobIdsRef.current.has(jobId)
+          !rejectedPopupJobIdsRef.current.has(popupKey)
         );
       });
 
       if (pendingAssigned) {
-        const jobId = Number(pendingAssigned.id);
+        const jobId = assignmentPopupKey(pendingAssigned);
         assignedPopupJobIdRef.current = jobId;
         setAssignedPopupJob(pendingAssigned);
       } else {
@@ -717,8 +801,7 @@ export default function TechnicianJobsPage() {
   // When timer expires, close the assignment popup automatically for this technician
   useEffect(() => {
     if (assignedPopupJob && timerSeconds !== null && timerSeconds <= 0) {
-      const jobId = Number(assignedPopupJob.id);
-      rejectedPopupJobIdsRef.current.add(jobId);
+      rememberPopupDismissal(assignedPopupJob);
       assignedPopupJobIdRef.current = null;
       setAssignedPopupJob(null);
       void loadJobs();
@@ -843,10 +926,11 @@ const assignmentDistanceDisplay = !isValidCustomerLocation
       return;
     }
 
-    if (normalizeStatus(currentJob?.status) !== "ACCEPTED") {
+    const currentStatus = normalizeStatus(currentJob?.status);
+    const canStart = currentStatus === "ACCEPTED";
 
+    if (!canStart) {
       return;
-
     }
 
     if (
@@ -1086,7 +1170,7 @@ const assignmentDistanceDisplay = !isValidCustomerLocation
 
     // Suppress this offer for the rest of this page session so polling
     // cannot reopen the assignment popup while the rejection dialog is open.
-    rejectedPopupJobIdsRef.current.add(jobId);
+    rememberPopupDismissal(assignedPopupJob);
     assignedPopupJobIdRef.current = null;
     setAssignedPopupJob(null);
     setRejectReason("");
@@ -1141,7 +1225,6 @@ const assignmentDistanceDisplay = !isValidCustomerLocation
   const getActions = (job: any) => {
 
     const st = normalizeStatus(job?.status);
-
     const btns: ReactNode[] = [];
 
     const isLoading = actionLoading === job?.id;
@@ -1152,10 +1235,13 @@ const assignmentDistanceDisplay = !isValidCustomerLocation
         STARTED_JOB_STATUSES.includes(normalizeStatus(candidate.status)),
     );
 
-    const blockedByEarlierScheduledJob =
-      st === "ACCEPTED" && !isJobSequenceStartAllowed(job, jobs);
+    const isForceAssigned = job?.assigned_by === "SYSTEM_FORCE_ASSIGNMENT";
+    const canStartJob = st === "ACCEPTED";
 
-    if (st === "ASSIGNED" || st === "ACTIVE") {
+    const blockedByEarlierScheduledJob =
+      canStartJob && !isJobSequenceStartAllowed(job, jobs);
+
+    if ((st === "ASSIGNED" || st === "ACTIVE") && !isForceAssigned) {
 
       btns.push(
 
@@ -1247,7 +1333,7 @@ const assignmentDistanceDisplay = !isValidCustomerLocation
 
     }
 
-    if (st === "ACCEPTED") {
+    if (canStartJob) {
 
       const isStarting =
 
@@ -2060,7 +2146,9 @@ const assignmentDistanceDisplay = !isValidCustomerLocation
                     {job.priority || "MEDIUM"}
                   </span>
                   <span style={{ ...s.badge(statusMeta.bg, statusMeta.fg), padding: "6px 13px", fontSize: 12 }}>
-                    {getStatusLabel(job.status)}
+                    {job?.assigned_by === "SYSTEM_FORCE_ASSIGNMENT"
+                      ? "FORCE ASSIGNED"
+                      : getStatusLabel(job.status)}
                   </span>
                 </div>
 
@@ -2138,8 +2226,13 @@ const assignmentDistanceDisplay = !isValidCustomerLocation
 
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                   <span style={{ width: 28, height: 28, borderRadius: "50%", background: "#D1FAE5", color: "#059669", display: "grid", placeItems: "center" }}><CheckCircle size={17} /></span>
-                  <span style={s.badge(statusMeta.bg, statusMeta.fg)}>{getStatusLabel(job.status)}</span>
-                  {acceptanceSeconds !== null &&
+                  <span style={s.badge(statusMeta.bg, statusMeta.fg)}>
+                    {job?.assigned_by === "SYSTEM_FORCE_ASSIGNMENT"
+                      ? "FORCE ASSIGNED"
+                      : getStatusLabel(job.status)}
+                  </span>
+                  {job?.assigned_by !== "SYSTEM_FORCE_ASSIGNMENT" &&
+                    acceptanceSeconds !== null &&
                     acceptanceSeconds !== undefined && (
                       <span
                         data-testid="assigned-job-acceptance-countdown"
@@ -2206,13 +2299,26 @@ const assignmentDistanceDisplay = !isValidCustomerLocation
 
       )}
 
-      {assignedPopupJob && !rejectModal && (
+      {forceAssignedPopupJob && !rejectModal && (
+        <TechnicianForceAssignPopup
+          job={forceAssignedPopupJob}
+          onClose={() => {
+            rememberPopupDismissal(forceAssignedPopupJob, true);
+            setForceAssignedPopupJob(null);
+          }}
+        />
+      )}
+      {assignedPopupJob && assignedPopupJob.assigned_by !== "SYSTEM_FORCE_ASSIGNMENT" && !forceAssignedPopupJob && !rejectModal && (
         <TechnicianJobAssignmentPopup
           job={assignedPopupJob}
           countdownSeconds={timerSeconds}
           distanceDisplay={assignmentDistanceDisplay}
           loading={actionLoading === assignedPopupJob.id}
-          onClose={() => setAssignedPopupJob(null)}
+          onClose={() => {
+            rememberPopupDismissal(assignedPopupJob);
+            assignedPopupJobIdRef.current = null;
+            setAssignedPopupJob(null);
+          }}
           onAccept={() => void handlePopupAccept()}
           onReject={handlePopupRejectClick}
         />

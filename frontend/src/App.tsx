@@ -3091,13 +3091,12 @@ function AppInner() {
             minHeight: 0,
           }}
         >
-          {isTechnician && (
-  <>
+          {isTechnician && user?.id && user?.tenant_id && (
+            <>
               <TechnicianAvailabilityLocation
-            technicianId={String(user?.id)}
-            tenantId={String(user?.tenant_id)}
-            technicianStatus={
-              technicianAvailability}/>
+                technicianId={String(user.id)}
+                tenantId={String(user.tenant_id)}
+              />
 
               <TechnicianLocationTracker user={user} />
             </>

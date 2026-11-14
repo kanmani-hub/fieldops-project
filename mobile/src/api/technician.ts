@@ -2,6 +2,7 @@ import { apiClient } from "./client";
 
 export interface TechnicianJob {
   id: string | number;
+  assigned_by?: string | null;
   can_start?: boolean;
   images?: string[];
   payment_status?: string | null;
@@ -58,6 +59,7 @@ export interface TechnicianJobQuery {
 
 interface TechnicianJobApiResponse {
   id: string | number;
+  assigned_by?: string | null;
   can_start?: boolean | null;
   images?: string[] | null;
   payment_status?: string | null;

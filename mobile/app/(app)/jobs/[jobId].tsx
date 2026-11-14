@@ -367,7 +367,7 @@ export default function JobDetailScreen() {
       ? Math.max(
           0,
           Math.floor(
-            (assignedAtMs + 10 * 60 * 1000 - currentTimeMs) / 1000
+            (assignedAtMs + 5 * 60 * 1000 - currentTimeMs) / 1000
           )
         )
       : null;
@@ -530,7 +530,7 @@ export default function JobDetailScreen() {
       return;
     }
 
-    const deadlineMs = assignedAtMs + 10 * 60 * 1000;
+    const deadlineMs = assignedAtMs + 5 * 60 * 1000;
 
     setCurrentTimeMs(Date.now());
 

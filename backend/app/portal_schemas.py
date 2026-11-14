@@ -443,6 +443,7 @@ class TechnicianJobResponse(BaseModel):
     updated_at: Optional[datetime] = None
     sla_deadline: Optional[datetime] = None
     assigned_at: Optional[datetime] = None
+    assigned_by: Optional[str] = None
     en_route_at: Optional[datetime] = None
     on_site_at: Optional[datetime] = None
     work_started_at: Optional[datetime] = None

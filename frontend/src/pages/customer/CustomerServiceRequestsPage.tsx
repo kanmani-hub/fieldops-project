@@ -164,7 +164,9 @@ const getDisplayStatusText = (status: string) => {
     case "QUEUED":
       return "UNASSIGNED";
     case "ASSIGNED":
+      return "ASSIGNED";
     case "AWAITING_ACCEPTANCE":
+    case "FORCE_ASSIGNED":
       return "AWAITING ACCEPTANCE";
     case "ACCEPTED":
       return "ACCEPTED";
@@ -242,10 +244,10 @@ export default function CustomerServiceRequestsPage({
   };
 
   const isUnassigned = (s: string) =>
-    ["CREATED", "PENDING", "UNASSIGNED", "ASSIGNED", "QUEUED"].includes(s);
+    ["CREATED", "PENDING", "UNASSIGNED", "AWAITING_ACCEPTANCE", "QUEUED", "DISPATCHED"].includes(s);
 
   const isAssigned = (s: string) =>
-    s === "ACCEPTED";
+    ["ASSIGNED", "ACCEPTED"].includes(s);
 
   const isActiveJob = (s: string) =>
     ["EN_ROUTE", "ON_SITE", "IN_PROGRESS"].includes(s);

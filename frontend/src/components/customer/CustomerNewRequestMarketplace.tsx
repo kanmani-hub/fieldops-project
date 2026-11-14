@@ -70,6 +70,21 @@ const TIME_SLOTS = [
   "07:00 PM",
 ];
 
+const CHENNAI_SERVICE_CENTER = { lat: 13.0827, lng: 80.2707 };
+const CHENNAI_SERVICE_RADIUS_KM = 100;
+const CHENNAI_SERVICE_ERROR = "Select a location within 100 km of Chennai. We do not provide service outside this area.";
+
+const isWithinChennaiServiceArea = (lat: number, lng: number): boolean => {
+  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+  const latDelta = toRadians(lat - CHENNAI_SERVICE_CENTER.lat);
+  const lngDelta = toRadians(lng - CHENNAI_SERVICE_CENTER.lng);
+  const a = Math.sin(latDelta / 2) ** 2 +
+    Math.cos(toRadians(CHENNAI_SERVICE_CENTER.lat)) * Math.cos(toRadians(lat)) *
+    Math.sin(lngDelta / 2) ** 2;
+  const distanceKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return distanceKm <= CHENNAI_SERVICE_RADIUS_KM;
+};
+
 // Convert slot strings like "08:30 AM" / "07:00 PM" to minutes since midnight
 const parseSlotMinutes = (slot: string): number => {
   const match = slot.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
@@ -558,6 +573,11 @@ export default function CustomerNewRequestMarketplace({
       async (pos) => {
         const lat = pos.coords.latitude;
         const lng = pos.coords.longitude;
+        if (!isWithinChennaiServiceArea(lat, lng)) {
+          setIsLocating(false);
+          addToast({ title: "Outside Service Area", message: CHENNAI_SERVICE_ERROR, type: "error" });
+          return;
+        }
         setSiteCoords({ lat, lng });
 
         try {
@@ -626,6 +646,10 @@ export default function CustomerNewRequestMarketplace({
 
   // Confirm Location from Map Modal
   const handleConfirmMapLocation = () => {
+    if (!isWithinChennaiServiceArea(tempMarkerCoords.lat, tempMarkerCoords.lng)) {
+      addToast({ title: "Outside Service Area", message: CHENNAI_SERVICE_ERROR, type: "error" });
+      return;
+    }
     setSiteCoords(tempMarkerCoords);
     if (tempResolvedAddress) {
       setLocationAddress(tempResolvedAddress);
@@ -647,6 +671,12 @@ export default function CustomerNewRequestMarketplace({
       setSubmitError(null);
       addToast({ title, message, type: "error" });
     };
+
+    if (siteCoords.lat != null && siteCoords.lng != null &&
+        !isWithinChennaiServiceArea(siteCoords.lat, siteCoords.lng)) {
+      showValidationToast(CHENNAI_SERVICE_ERROR, "Outside Service Area");
+      return;
+    }
 
     if (!selectedIssue) {
       showValidationToast("Please select a diagnostic issue.");
@@ -3201,6 +3231,8 @@ export default function CustomerNewRequestMarketplace({
             <LocationPickerMap
               latitude={tempMarkerCoords.lat}
               longitude={tempMarkerCoords.lng}
+              isSelectionAllowed={isWithinChennaiServiceArea}
+              onSelectionRejected={() => addToast({ title: "Outside Service Area", message: CHENNAI_SERVICE_ERROR, type: "error" })}
               onChange={(lat, lng, address) => {
                 setTempMarkerCoords({ lat, lng });
                 if (address) {

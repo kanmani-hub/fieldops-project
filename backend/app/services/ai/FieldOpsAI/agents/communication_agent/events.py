@@ -39,6 +39,13 @@ TRANSITION_TO_EVENT = {
     ("ACTIVE", "ASSIGNED"): JobEvent.TECHNICIAN_ASSIGNED,
     # Technician acceptance/rejection
     ("ASSIGNED", "ACCEPTED"): JobEvent.TECHNICIAN_ACCEPTED,
+    # Force assignment is persisted as accepted in one step, bypassing the
+    # intermediate ASSIGNED state used by a normal technician acceptance.
+    ("CREATED", "ACCEPTED"): JobEvent.TECHNICIAN_ACCEPTED,
+    ("QUEUED", "ACCEPTED"): JobEvent.TECHNICIAN_ACCEPTED,
+    ("UNASSIGNED", "ACCEPTED"): JobEvent.TECHNICIAN_ACCEPTED,
+    ("OFFERED", "ACCEPTED"): JobEvent.TECHNICIAN_ACCEPTED,
+    ("REJECTED_BY_TECHNICIAN", "ACCEPTED"): JobEvent.TECHNICIAN_ACCEPTED,
     ("ASSIGNED", "REJECTED_BY_TECHNICIAN"): JobEvent.TECHNICIAN_REJECTED,
     ("ASSIGNED", "QUEUED"): JobEvent.TECHNICIAN_REJECTED,
 

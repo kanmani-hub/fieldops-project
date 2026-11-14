@@ -141,6 +141,23 @@ def haversine_km(
     return 2 * R * asin(sqrt(a))
 
 
+CHENNAI_SERVICE_CENTER = (13.0827, 80.2707)
+CHENNAI_SERVICE_RADIUS_KM = 100.0
+CHENNAI_SERVICE_AREA_ERROR = (
+    "Select a location within 100 km of Chennai. "
+    "We do not provide service outside this area."
+)
+
+
+def is_within_chennai_service_area(latitude: float, longitude: float) -> bool:
+    return haversine_km(
+        latitude,
+        longitude,
+        CHENNAI_SERVICE_CENTER[0],
+        CHENNAI_SERVICE_CENTER[1],
+    ) <= CHENNAI_SERVICE_RADIUS_KM
+
+
 def geocode_customer_location(address: str):
     """Geocode an address with Ola Maps, then Photon.
 
@@ -312,6 +329,34 @@ def _customer_job_acceptance(db: Session, job: Job) -> tuple[bool, Optional[date
         "IN_PROGRESS", "COMPLETED", "CLOSED",
     }
     return accepted_by_status, None
+
+
+def _is_force_assigned(db: Session, job: Job) -> bool:
+    """Return whether the current technician was assigned by dispatch fallback.
+
+    Force assignment makes the technician visible to the customer, but it is
+    not technician acceptance and must not change the acceptance fields.
+    """
+    if job.assigned_technician_id is None:
+        return False
+
+    if (
+        str(getattr(job, "assigned_by", "") or "").strip().upper()
+        == "SYSTEM_FORCE_ASSIGNMENT"
+    ):
+        return True
+
+    query = db.query(JobAssignment).filter(
+        JobAssignment.job_id == job.id,
+        JobAssignment.technician_id == job.assigned_technician_id,
+        JobAssignment.status == "FORCE_ASSIGNED",
+    )
+    if job.tenant_id:
+        query = query.filter(
+            JobAssignment.tenant_id == str(job.tenant_id)
+        )
+
+    return query.first() is not None
 
 
 def _customer_distance_travelled_km(
@@ -786,6 +831,8 @@ async def list_service_requests(
             or sr_status_str in {"REJECTED_BY_TECHNICIAN", "EXHAUSTED", "FAILED", "REJECTED", "TIMED_OUT"}
         ):
             service_request.status = "CANCELLED"
+        elif sr_status_str == "FORCE_ASSIGNED":
+            service_request.status = "FORCE_ASSIGNED"
         elif job_status_str in {"ASSIGNED", "AWAITING_ACCEPTANCE", "QUEUED", "DISPATCHED", "PENDING"} or sr_status_str in {"ASSIGNED", "AWAITING_ACCEPTANCE", "QUEUED"}:
             service_request.status = "AWAITING_ACCEPTANCE"
         elif job_status_str in ["COMPLETED", "CLOSED"] or sr_status_str in ["COMPLETED", "CLOSED"]:
@@ -854,6 +901,15 @@ async def create_service_request(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Location is required",
         )
+    if data.site_latitude is not None and data.site_longitude is not None:
+        if not is_within_chennai_service_area(
+            data.site_latitude,
+            data.site_longitude,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=CHENNAI_SERVICE_AREA_ERROR,
+            )
     # ──────────────────────────────────────────────
     # Customer details
     # ──────────────────────────────────────────────
@@ -1000,6 +1056,17 @@ async def create_service_request(
         if geo:
             customer_latitude = geo.get("latitude")
             customer_longitude = geo.get("longitude")
+
+    if customer_latitude is None or customer_longitude is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="We could not verify this location. Please select a point within 100 km of Chennai.",
+        )
+    if not is_within_chennai_service_area(customer_latitude, customer_longitude):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=CHENNAI_SERVICE_AREA_ERROR,
+        )
 
     if top_3:
         selected_tenant_id = top_3[0]["organization_id"]
@@ -1971,16 +2038,27 @@ async def track_customer_jobs(
 
     # Technician IDs are resolved independently of the job tenant.
     # Automatic dispatch supports cross-organization assignments.
+    technician_tenant_pairs = {
+        (str(job.tenant_id), job.assigned_technician_id)
+        for job in jobs
+        if job.assigned_technician_id is not None and job.tenant_id
+    }
+
     technicians = (
         db.query(Technician)
-        .filter(Technician.technician_id.in_(technician_ids))
+        .filter(
+            Technician.technician_id.in_(technician_ids),
+            Technician.tenant_id.in_(
+                {tenant_id for tenant_id, _ in technician_tenant_pairs}
+            ),
+        )
         .all()
-        if technician_ids
+        if technician_ids and technician_tenant_pairs
         else []
     )
 
-    technicians_by_id = {
-        tech.technician_id: tech
+    technicians_by_key = {
+        (str(tech.tenant_id), tech.technician_id): tech
         for tech in technicians
     }
 
@@ -2011,9 +2089,20 @@ async def track_customer_jobs(
         status_upper = str(job.status or "").upper()
         technician_accepted, accepted_at = _customer_job_acceptance(db, job)
 
+        force_assigned = _is_force_assigned(db, job)
+
         if status_upper in {"CANCELLED", "CANCELED", "REJECTED_BY_TECHNICIAN", "EXHAUSTED", "FAILED"}:
             effective_job_status = "CANCELLED"
-        elif not technician_accepted and status_upper in {"ASSIGNED", "AWAITING_ACCEPTANCE", "QUEUED", "DISPATCHED", "PENDING"}:
+        elif (
+            not technician_accepted
+            and status_upper in {
+                "ASSIGNED",
+                "AWAITING_ACCEPTANCE",
+                "QUEUED",
+                "DISPATCHED",
+                "PENDING",
+            }
+        ):
             effective_job_status = "AWAITING_ACCEPTANCE"
         elif status_upper == "QUEUED":
             effective_job_status = "AWAITING_ACCEPTANCE"
@@ -2037,8 +2126,15 @@ async def track_customer_jobs(
             "IN_PROGRESS", "COMPLETED", "CLOSED",
         }
 
-        if tech_accepted and job.assigned_technician_id:
-            tech = technicians_by_id.get(job.assigned_technician_id)
+        # Normal broadcast assignments stay hidden until accepted.
+        # A successful force assignment is directly visible, but is not acceptance.
+        if (
+            job.assigned_technician_id
+            and (tech_accepted or force_assigned)
+        ):
+            tech = technicians_by_key.get(
+                (str(job.tenant_id), job.assigned_technician_id)
+            )
             if tech:
                 tech_name = tech.technician_name
                 tech_phone = tech.phone_number
@@ -2087,7 +2183,9 @@ async def track_customer_jobs(
                     )
 
         latest_ping = _latest_technician_ping(db, job)
-        assigned_technician = technicians_by_id.get(job.assigned_technician_id)
+        assigned_technician = technicians_by_key.get(
+            (str(job.tenant_id), job.assigned_technician_id)
+        ) if job.assigned_technician_id is not None and job.tenant_id else None
         distance_travelled_km = _customer_distance_travelled_km(
             db, job, assigned_technician
         )
@@ -2192,9 +2290,20 @@ async def get_customer_job_detail(
     status_upper = str(job.status or "").upper()
     technician_accepted, accepted_at = _customer_job_acceptance(db, job)
 
+    force_assigned = _is_force_assigned(db, job)
+
     if status_upper in {"CANCELLED", "CANCELED", "REJECTED_BY_TECHNICIAN", "EXHAUSTED", "FAILED"}:
         effective_job_status = "CANCELLED"
-    elif not technician_accepted and status_upper in {"ASSIGNED", "AWAITING_ACCEPTANCE", "QUEUED", "DISPATCHED", "PENDING"}:
+    elif (
+        not technician_accepted
+        and status_upper in {
+            "ASSIGNED",
+            "AWAITING_ACCEPTANCE",
+            "QUEUED",
+            "DISPATCHED",
+            "PENDING",
+        }
+    ):
         effective_job_status = "AWAITING_ACCEPTANCE"
     elif status_upper == "QUEUED":
         effective_job_status = "AWAITING_ACCEPTANCE"
@@ -2218,13 +2327,14 @@ async def get_customer_job_detail(
         "IN_PROGRESS", "COMPLETED", "CLOSED",
     }
 
-    if tech_accepted and job.assigned_technician_id:
-
-        # Technician belongs to the organization
-        # that owns the Job.
+    if (
+        job.assigned_technician_id
+        and (tech_accepted or force_assigned)
+    ):
+        # The technician must belong to the organization that owns this job.
         tech = db.query(Technician).filter(
-            Technician.technician_id
-            == job.assigned_technician_id,
+            Technician.technician_id == job.assigned_technician_id,
+            Technician.tenant_id == str(job.tenant_id),
         ).first()
 
         if tech:
@@ -2282,6 +2392,7 @@ async def get_customer_job_detail(
     if job.assigned_technician_id is not None:
         assigned_technician = db.query(Technician).filter(
             Technician.technician_id == job.assigned_technician_id,
+            Technician.tenant_id == str(job.tenant_id),
         ).first()
     distance_travelled_km = _customer_distance_travelled_km(
         db, job, assigned_technician

@@ -1,3 +1,4 @@
+
 import json
 import logging
 from datetime import datetime, timezone, timedelta
@@ -8,15 +9,19 @@ logger = logging.getLogger(__name__)
 
 class TimerService:
     """
-    Technician assignment acceptance timer.
+    Technician acceptance timers.
 
-    Redis is used for:
-      - fast timer lookup
-      - countdown/TTL
-      - warning processing
+    Broadcast dispatch:
+        One independent timer per (job_id, technician_id).
 
-    The database assignment timestamp should remain the
-    authoritative source for whether an assignment is actually expired.
+    Legacy dispatch:
+        Existing job-only timer keys remain supported.
+
+    Redis is used for fast timer lookup, countdown/TTL,
+    and warning processing.
+
+    The database remains authoritative for assignment state
+    and whether an offer has actually expired.
     """
 
     ACCEPTANCE_DURATION_SECONDS = 5 * 60
@@ -26,17 +31,43 @@ class TimerService:
     WARNING_PREFIX = "job:timer_warning:"
     WARNED_PREFIX = "job:timer_warned:"
 
-    @classmethod
-    def _timer_key(cls, job_id: str) -> str:
-        return f"{cls.TIMER_PREFIX}{job_id}"
+    # ---------------------------------------------------------
+    # Redis key builders
+    # ---------------------------------------------------------
 
     @classmethod
-    def _warning_key(cls, job_id: str) -> str:
-        return f"{cls.WARNING_PREFIX}{job_id}"
+    def _scope(cls, job_id: str, technician_id=None) -> str:
+        """
+        Return a unique timer scope.
+
+        Legacy:
+            job:timer:105
+
+        Broadcast:
+            job:timer:105:tech:7
+        """
+        scope = str(job_id)
+
+        if technician_id is not None:
+            scope = f"{scope}:tech:{technician_id}"
+
+        return scope
 
     @classmethod
-    def _warned_key(cls, job_id: str) -> str:
-        return f"{cls.WARNED_PREFIX}{job_id}"
+    def _timer_key(cls, job_id: str, technician_id=None) -> str:
+        return f"{cls.TIMER_PREFIX}{cls._scope(job_id, technician_id)}"
+
+    @classmethod
+    def _warning_key(cls, job_id: str, technician_id=None) -> str:
+        return f"{cls.WARNING_PREFIX}{cls._scope(job_id, technician_id)}"
+
+    @classmethod
+    def _warned_key(cls, job_id: str, technician_id=None) -> str:
+        return f"{cls.WARNED_PREFIX}{cls._scope(job_id, technician_id)}"
+
+    # ---------------------------------------------------------
+    # Start timer
+    # ---------------------------------------------------------
 
     @classmethod
     def start_timer(
@@ -47,13 +78,17 @@ class TimerService:
         duration_seconds: int = ACCEPTANCE_DURATION_SECONDS,
     ) -> bool:
         """
-        Start or restart the technician acceptance timer.
+        Start or restart one technician's acceptance timer.
+
+        Each technician receives independent timer and warning keys.
+        Starting another technician's timer does not overwrite this one.
         """
 
         if redis_client is None:
             logger.warning(
-                "TimerService: Redis unavailable for job %s",
+                "TimerService: Redis unavailable for job=%s technician=%s",
                 job_id,
+                tech_id,
             )
             return False
 
@@ -65,23 +100,18 @@ class TimerService:
         duration_seconds = max(1, duration_seconds)
 
         now = datetime.now(timezone.utc)
-
-        expires_at = now + timedelta(
-            seconds=duration_seconds
-        )
+        expires_at = now + timedelta(seconds=duration_seconds)
 
         warning_seconds = max(
             0,
             duration_seconds - cls.WARNING_BEFORE_SECONDS,
         )
 
-        warning_at = now + timedelta(
-            seconds=warning_seconds
-        )
+        warning_at = now + timedelta(seconds=warning_seconds)
 
         timer_data = {
             "job_id": str(job_id),
-            "tech_id": str(tech_id),
+            "tech_id": str(tech_id) if tech_id is not None else None,
             "started_at": now.isoformat(),
             "expires_at": expires_at.isoformat(),
             "duration_seconds": duration_seconds,
@@ -89,39 +119,36 @@ class TimerService:
 
         warning_data = {
             "job_id": str(job_id),
-            "tech_id": str(tech_id),
+            "tech_id": str(tech_id) if tech_id is not None else None,
             "warning_at": warning_at.isoformat(),
             "expires_at": expires_at.isoformat(),
         }
 
+        timer_key = cls._timer_key(job_id, tech_id)
+        warning_key = cls._warning_key(job_id, tech_id)
+        warned_key = cls._warned_key(job_id, tech_id)
+
         try:
-            # Always replace the old timer.
             redis_client.setex(
-                cls._timer_key(job_id),
+                timer_key,
                 duration_seconds,
                 json.dumps(timer_data),
             )
 
-            # Create warning timer.
             if warning_seconds > 0:
                 redis_client.setex(
-                    cls._warning_key(job_id),
+                    warning_key,
                     warning_seconds,
                     json.dumps(warning_data),
                 )
             else:
-                redis_client.delete(
-                    cls._warning_key(job_id)
-                )
+                redis_client.delete(warning_key)
 
-            # Clear previous warning flag.
-            redis_client.delete(
-                cls._warned_key(job_id)
-            )
+            redis_client.delete(warned_key)
 
             logger.info(
-                "TimerService: Started timer "
-                "job=%s tech=%s duration=%ss expires=%s",
+                "TimerService: Started acceptance timer "
+                "job=%s technician=%s duration=%ss expires=%s",
                 job_id,
                 tech_id,
                 duration_seconds,
@@ -132,37 +159,59 @@ class TimerService:
 
         except Exception:
             logger.exception(
-                "TimerService: Failed to start timer for job %s",
+                "TimerService: Failed to start timer "
+                "job=%s technician=%s",
                 job_id,
+                tech_id,
             )
             return False
+
+    # ---------------------------------------------------------
+    # Cancel timer
+    # ---------------------------------------------------------
+
     @classmethod
     def cancel_timer(
         cls,
         redis_client,
         job_id: str,
+        tech_id=None,
     ) -> bool:
-        """Cancel all timer-related Redis keys."""
+        """
+        Cancel timer keys.
+
+        If tech_id is supplied:
+            Cancels only that technician's broadcast offer timer.
+
+        If tech_id is omitted:
+            Cancels the legacy job-only timer.
+
+        IMPORTANT:
+            Omitting tech_id does not cancel every broadcast timer.
+        """
 
         if redis_client is None:
             return False
 
         keys = (
-            cls._timer_key(job_id),
-            cls._warning_key(job_id),
-            cls._warned_key(job_id),
+            cls._timer_key(job_id, tech_id),
+            cls._warning_key(job_id, tech_id),
+            cls._warned_key(job_id, tech_id),
         )
 
         try:
             deleted_count = 0
 
+            # RedisCacheManager.delete accepts one key at a time.
             for key in keys:
                 result = redis_client.delete(key)
                 deleted_count += int(result or 0)
 
             logger.info(
-                "TimerService: Cancelled timer keys for job=%s deleted=%s",
+                "TimerService: Cancelled timer "
+                "job=%s technician=%s deleted=%s",
                 job_id,
+                tech_id,
                 deleted_count,
             )
 
@@ -170,23 +219,29 @@ class TimerService:
 
         except Exception:
             logger.exception(
-                "TimerService: Failed to cancel timer for job %s",
+                "TimerService: Failed to cancel timer "
+                "job=%s technician=%s",
                 job_id,
+                tech_id,
             )
             return False
+
+    # ---------------------------------------------------------
+    # Read timer
+    # ---------------------------------------------------------
 
     @classmethod
     def get_timer(
         cls,
         redis_client,
         job_id: str,
+        tech_id=None,
     ) -> Optional[dict]:
         """
-        Read timer payload from Redis.
+        Read one timer payload.
 
-        None means Redis does not currently contain
-        the timer. It does NOT mean that the assignment
-        is necessarily expired.
+        None means the Redis timer is missing or unavailable.
+        It does not prove that the database offer has expired.
         """
 
         if redis_client is None:
@@ -194,7 +249,7 @@ class TimerService:
 
         try:
             raw = redis_client.get(
-                cls._timer_key(job_id)
+                cls._timer_key(job_id, tech_id)
             )
 
             if raw is None:
@@ -212,21 +267,28 @@ class TimerService:
 
         except Exception:
             logger.exception(
-                "TimerService: Failed to read timer for job %s",
+                "TimerService: Failed to read timer "
+                "job=%s technician=%s",
                 job_id,
+                tech_id,
             )
             return None
+
+    # ---------------------------------------------------------
+    # Remaining time
+    # ---------------------------------------------------------
 
     @classmethod
     def get_remaining_seconds(
         cls,
         redis_client,
         job_id: str,
+        tech_id=None,
     ) -> Optional[int]:
         """
-        Get Redis TTL.
+        Return Redis TTL for one timer.
 
-        None means Redis timer is unavailable/missing.
+        None means the timer is unavailable or missing.
         """
 
         if redis_client is None:
@@ -234,7 +296,7 @@ class TimerService:
 
         try:
             ttl = redis_client.ttl(
-                cls._timer_key(job_id)
+                cls._timer_key(job_id, tech_id)
             )
 
             if ttl is None or ttl < 0:
@@ -244,24 +306,28 @@ class TimerService:
 
         except Exception:
             logger.exception(
-                "TimerService: Failed to read TTL for job %s",
+                "TimerService: Failed to read TTL "
+                "job=%s technician=%s",
                 job_id,
+                tech_id,
             )
             return None
+
+    # ---------------------------------------------------------
+    # Active timer check
+    # ---------------------------------------------------------
 
     @classmethod
     def is_timer_active(
         cls,
         redis_client,
         job_id: str,
+        tech_id=None,
     ) -> bool:
         """
-        Fast Redis check.
+        Check whether one timer key exists in Redis.
 
-        IMPORTANT:
-        This is only a Redis availability check.
-        It must NOT be used as the authoritative
-        assignment-expiration check.
+        This is not an authoritative database expiration check.
         """
 
         if redis_client is None:
@@ -270,12 +336,15 @@ class TimerService:
         try:
             return bool(
                 redis_client.exists(
-                    cls._timer_key(job_id)
+                    cls._timer_key(job_id, tech_id)
                 )
             )
+
         except Exception:
             logger.exception(
-                "TimerService: Failed checking timer for job %s",
+                "TimerService: Failed checking timer "
+                "job=%s technician=%s",
                 job_id,
+                tech_id,
             )
             return False

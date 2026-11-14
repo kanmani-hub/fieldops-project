@@ -7,17 +7,14 @@ Runtime integration for the FieldOps Dispatcher Agent.
 Responsibilities:
 - Load real jobs from the database.
 - Preserve the complete ranked technician pool.
-- Use the first three candidates for the initial dispatch batch.
-- Request fresh planning when the existing candidate pool is exhausted.
-- Start the LangGraph dispatcher.
-- Offer jobs through the existing technician portal.
-- Create real in-app notifications.
-- Start the real acceptance timer.
-- Resume the graph when technician accepts/rejects/times out.
+- Preserve the complete ranked eligible technician pool.
+- Broadcast an offer to every eligible technician concurrently.
+- Let the database atomically select the first accepting technician.
+- Wait for every offer to become terminal before replanning.
 
 Important:
 - This file does NOT use the manual assignment endpoint.
-- LangGraph owns orchestration.
+- Broadcast offer coordination is persisted in Job.dispatch_state.
 - Database/service layer owns operational side effects.
 """
 
@@ -46,6 +43,11 @@ from app.services.ai.FieldOpsAI.graph.planning_graph import planning_graph
 from app.services.timer_service import TimerService
 from app.services.planning_output_log import write_planning_output
 
+from app.services.force_assignment_service import (
+    try_force_assign_job,
+)
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -61,22 +63,26 @@ NON_DISPATCHABLE_STATUSES = frozenset({
 })
 
 
+class WorkloadLimitReached(RuntimeError):
+    """Candidate is intentionally excluded because stored workload is at limit."""
+
+
+
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
 
 def log_planning_top3(job_id, ranked, excluded=None):
     excluded = excluded or set()
-    batch = ranked[:3]
-    batch_number = len(excluded) // 3 + 1
-    remaining_after = max(0, len(ranked) - len(batch))
+    batch = ranked
+    batch_number = 1 if not excluded else 2
+    remaining_after = 0
 
     print("=" * 50)
     print(f"PLANNING BATCH {batch_number}" if batch_number == 1 else f"REPLANNING BATCH {batch_number}")
     print("=" * 14)
     print(f"Job ID: {job_id}")
-    print(f"Technicians in this batch: {len(batch)}")
-    print(f"Remaining after this batch: {remaining_after}")
+    print(f"Eligible technicians in broadcast: {len(batch)}")
     if excluded:
         print(f"Already attempted: {sorted(excluded)}")
     print()
@@ -126,240 +132,238 @@ class DispatcherRuntime:
     # Public API
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _candidate_identity(candidate: dict[str, Any]) -> tuple[str, int] | None:
+        """Return a tenant-scoped technician identity."""
+        if not isinstance(candidate, dict):
+            return None
+        tenant_id = candidate.get("tenant_id") or candidate.get("organization_id")
+        technician_id = candidate.get("technician_id")
+        if tenant_id is None or technician_id is None:
+            return None
+        try:
+            return str(tenant_id), int(technician_id)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _identity_payload(identity: tuple[str, int]) -> dict[str, Any]:
+        return {"tenant_id": identity[0], "technician_id": identity[1]}
+
+    @classmethod
+    def _identity_set(cls, values: list[Any] | None) -> set[tuple[str, int]]:
+        result: set[tuple[str, int]] = set()
+        for value in values or []:
+            if isinstance(value, dict):
+                identity = cls._candidate_identity(value)
+                if identity is not None:
+                    result.add(identity)
+        return result
+
     async def start_dispatch(
         self,
         job_id: int,
         initial_candidates: list[dict[str, Any]] | None = None,
         dispatch_attempt_id: str | None = None,
     ) -> dict[str, Any]:
-        """
-        Start automatic dispatch for a real job.
-
-        Use the already-ranked Planning result when the caller has one. The
-        scheduled recovery path may omit it, in which case Planning is queried
-        once at dispatch time. Dispatcher does not re-evaluate eligibility.
-        """
-
+        """Broadcast to every eligible technician returned by Planning."""
         dispatch_attempt_id = dispatch_attempt_id or str(uuid.uuid4())
 
         with SessionLocal() as db:
             job = self._get_job(db, job_id)
-
             if job is None:
                 raise ValueError(f"Job {job_id} not found")
-
-            # Do not start another automatic dispatch if the job
-            # is already assigned / accepted / active.
             if self._job_is_already_dispatched(job):
-                logger.info(
-                    "Skipping dispatch for job=%s because it is already dispatched",
-                    job_id,
-                )
-
                 return {
                     "job_id": job_id,
                     "status": "ALREADY_DISPATCHED",
-                    "assigned_technician_id": getattr(
-                        job,
-                        "assigned_technician_id",
-                        None,
-                    ),
+                    "assigned_technician_id": getattr(job, "assigned_technician_id", None),
                 }
-
-            current_status = str(getattr(job, "status", "") or "").strip().upper()
-            if current_status not in DISPATCHABLE_UNASSIGNED_STATUSES:
-                logger.info(
-                    "dispatch_skipped job_id=%s status=%s outcome=not_unassigned",
-                    job_id,
-                    current_status or "unknown",
-                )
+            status = str(getattr(job, "status", "") or "").strip().upper()
+            if status not in OFFERABLE_JOB_STATUSES:
                 return {"job_id": job_id, "status": "NOT_UNASSIGNED", "candidates": []}
-
             job_state = self._job_to_state(job)
-            job_state["dispatch_attempt_id"] = dispatch_attempt_id
-            previous_dispatch_state = getattr(job, "dispatch_state", None) or {}
-            attempted_ids = [
-                int(value)
-                for value in previous_dispatch_state.get("attempted_technician_ids", [])
-                if str(value).isdigit()
-            ]
-            if previous_dispatch_state.get("dispatch_attempt_id"):
-                dispatch_attempt_id = str(previous_dispatch_state["dispatch_attempt_id"])
-                job_state["dispatch_attempt_id"] = dispatch_attempt_id
-
-        logger.info(
-            "dispatcher_started job_id=%s technician_id=none dispatch_attempt_id=%s outcome=started candidate_source=%s",
-            job_id,
-            dispatch_attempt_id,
-            "planning_handoff" if initial_candidates is not None else "planning_refresh",
-        )
-
-        if initial_candidates is not None:
-            all_candidates = self._normalize_candidates(
-                initial_candidates,
-                excluded_ids=set(attempted_ids),
+            previous = getattr(job, "dispatch_state", None) or {}
+            # JobAssignment is authoritative for who has already received an
+            # offer. A technician ID is only unique inside its organization.
+            attempted_identities = {
+                (str(row.tenant_id), int(row.technician_id))
+                for row in db.query(models.JobAssignment).filter(
+                    models.JobAssignment.job_id == job_id,
+                    models.JobAssignment.assigned_at.isnot(None),
+                ).all()
+                if row.tenant_id is not None and row.technician_id is not None
+            }
+            attempted_identities.update(self._identity_set(previous.get("attempted_technicians")))
+            workload_excluded_identities = self._identity_set(
+                previous.get("workload_excluded_technicians")
             )
-        else:
-            logger.info("DISPATCHER REQUESTING INITIAL PLANNING | job_id=%s", job_id)
-            all_candidates = await self.request_planning(job_id, attempted_ids)
+            excluded_identities = attempted_identities | workload_excluded_identities
+            if previous.get("dispatch_attempt_id"):
+                dispatch_attempt_id = str(previous["dispatch_attempt_id"])
 
-        if all_candidates:
-            for candidate in all_candidates:
-                logger.info(
-                    "candidates_received job_id=%s technician_id=%s dispatch_attempt_id=%s rank=%s outcome=eligible_from_planning",
-                    job_id,
-                    candidate["technician_id"],
-                    dispatch_attempt_id,
-                    candidate.get("rank"),
-                )
-        else:
-            logger.info(
-                "candidates_received job_id=%s technician_id=none dispatch_attempt_id=%s outcome=empty",
+        candidates = (
+            self._normalize_candidates(initial_candidates, excluded_identities=excluded_identities)
+            if initial_candidates is not None
+            else await self.request_planning(
                 job_id,
-                dispatch_attempt_id,
+                [self._identity_payload(item) for item in sorted(excluded_identities)],
             )
-
-        write_planning_output(
-            "DISPATCHER_CANDIDATES_RECEIVED",
-            job_id=job_id,
-            dispatch_attempt_id=dispatch_attempt_id,
-            candidate_count=len(all_candidates),
-            candidates=[
-                {
-                    "rank": candidate.get("rank"),
-                    "technician_id": candidate.get("technician_id"),
-                    "technician_name": candidate.get("technician_name"),
-                    "organization_id": candidate.get("organization_id"),
-                }
-                for candidate in all_candidates
-            ],
         )
+        if not candidates:
+            # Keep the previous ranked pool: Planning may now return no new
+            # technicians, but previously offered technicians remain eligible
+            # for the force-assignment fallback unless they explicitly rejected.
+            previous_candidates = list(previous.get("all_candidates") or [])
+            previous_rejected = list(previous.get("rejected_technicians") or [])
 
-        if not all_candidates:
-            write_planning_output(
-                "DISPATCH_PENDING_NO_CANDIDATES",
-                job_id=job_id,
-                dispatch_attempt_id=dispatch_attempt_id,
-                attempted_technician_ids=attempted_ids,
-            )
-            print(
-                f"PLANNING ASSIGNMENT | Job ID: {job_id} | "
-                "Technician: none | Status: pending_no_candidates",
-                flush=True,
-            )
-            exhausted_state = {
+            exhausted = {
                 "job_id": job_id,
                 "dispatch_attempt_id": dispatch_attempt_id,
-                "all_candidates": [],
-                "candidates": [],
-                "batch_number": int(previous_dispatch_state.get("batch_number", 0)) + 1,
-                "current_index": 0,
-                "current_technician_id": None,
-                "attempted_technician_ids": attempted_ids,
-                "rejected_technician_ids": previous_dispatch_state.get("rejected_technician_ids", []),
-                "batch_exhausted": True,
-                "offer_status": None,
-                "last_offer_outcome": "NO_CANDIDATES",
+                "all_candidates": previous_candidates,
+                "attempted_technicians": [
+                    self._identity_payload(item) for item in sorted(attempted_identities)
+                ],
+                "workload_excluded_technicians": [
+                    self._identity_payload(item) for item in sorted(workload_excluded_identities)
+                ],
+                "rejected_technicians": previous_rejected,
+                "offers_broadcast": True,
                 "dispatch_exhausted": True,
-                "pending_retry": False,
-                "next_action": "DISPATCH_EXHAUSTED",
+                "next_action": "FORCE_ASSIGNMENT",
             }
-            rejected = self._mark_dispatch_exhausted(job_id, exhausted_state)
-            logger.warning(
-                "dispatch_exhausted_no_candidates job_id=%s technician_id=none dispatch_attempt_id=%s status=%s",
-                job_id,
-                dispatch_attempt_id,
-                "REJECTED_BY_TECHNICIAN" if rejected else "UNCHANGED",
-            )
 
+            force_result = await self._try_force_assignment(job_id, exhausted)
+            if force_result is not None:
+                return force_result
+
+            exhausted["next_action"] = "DISPATCH_EXHAUSTED"
+            changed = self._mark_dispatch_exhausted(job_id, exhausted)
             return {
                 "job_id": job_id,
-                "status": "REJECTED_BY_TECHNICIAN" if rejected else "NOT_RETRYABLE",
+                "status": "DISPATCH_EXHAUSTED" if changed else "NOT_RETRYABLE",
                 "candidates": [],
-                "dispatch_exhausted": rejected,
+                "dispatch_exhausted": changed,
             }
 
-        # Preserve the complete pool separately from the active batch.
-        state: DispatcherState = {
+        # Retain the complete candidate history across planning batches.
+        # Tenant-scoped identity is used so equal numeric IDs in different
+        # organizations are not collapsed.
+        candidate_history: dict[tuple[str, int], dict[str, Any]] = {}
+        for old_candidate in list(previous.get("all_candidates") or []) + list(candidates):
+            identity = self._candidate_identity(old_candidate)
+            if identity is not None:
+                candidate_history[identity] = old_candidate
+
+        state = {
             "job_id": job_id,
             "dispatch_attempt_id": dispatch_attempt_id,
             "job": job_state,
-            "all_candidates": all_candidates,
-            "candidates": all_candidates,
-            "batch_number": int(previous_dispatch_state.get("batch_number", 0)) + 1,
-            "current_index": 0,
-            "current_technician_id": None,
-            "attempted_technician_ids": attempted_ids,
-            "rejected_technician_ids": previous_dispatch_state.get("rejected_technician_ids", []),
-            "event": None,
-            "next_action": None,
-            "assigned_technician_id": None,
-            "planning_required": False,
-            "replanning_required": False,
-            "error": None,
-            "offers_broadcast": True,
-        }
-
-        logger.info(
-            "Starting dispatcher graph job=%s | total_candidates=%s | "
-            "initial_batch=%s",
-            job_id,
-            len(all_candidates),
-            [
-                candidate["technician_id"]
-                for candidate in all_candidates
+            "all_candidates": list(candidate_history.values()),
+            "candidates": candidates,
+            "attempted_technicians": [
+                self._identity_payload(item) for item in sorted(attempted_identities)
             ],
-        )
+            "workload_excluded_technicians": [
+                self._identity_payload(item) for item in sorted(workload_excluded_identities)
+            ],
+            "rejected_technicians": list(previous.get("rejected_technicians") or []),
+            "offers_broadcast": True,
+            "current_technician_id": None,
+            "current_batch_technicians": [],
+            "next_action": "CREATING_OFFERS",
+        }
+        prepared = dict(job_state)
+        prepared["dispatch_attempt_id"] = dispatch_attempt_id
+        prepared["_dispatch_state"] = DispatcherGraph._persistable_state(state)
 
-        # Persist and publish every eligible offer before LangGraph enters its
-        # response wait. PostgreSQL, via accept_broadcast_offer, selects the
-        # winner; candidate rank does not reserve the job.
-        prepared_state = dict(job_state)
-        prepared_state["dispatch_attempt_id"] = dispatch_attempt_id
-        prepared_state["_dispatch_state"] = DispatcherGraph._persistable_state(state)
-        offer_results = await asyncio.gather(
+        # Do not limit this list: every eligible candidate is offered concurrently.
+        outcomes = await asyncio.gather(
             *(
                 self.offer_job(
-                    {**prepared_state, "current_index": index},
+                    {**prepared, "_candidate": candidate, "_candidate_rank": candidate.get("rank")},
                     int(candidate["technician_id"]),
                 )
-                for index, candidate in enumerate(all_candidates)
+                for candidate in candidates
             ),
             return_exceptions=True,
         )
-        successful_ids = {
-            int(candidate["technician_id"])
-            for candidate, outcome in zip(all_candidates, offer_results)
+        successful = [
+            candidate for candidate, outcome in zip(candidates, outcomes)
             if not isinstance(outcome, Exception)
-        }
-        if not successful_ids:
-            result = {
-                **state,
-                "offers_broadcast": True,
-                "error": "Unable to create an offer for any eligible technician",
-                "next_action": "END",
+        ]
+        workload_skipped = [
+            candidate for candidate, outcome in zip(candidates, outcomes)
+            if isinstance(outcome, WorkloadLimitReached)
+        ]
+        failed = [
+            {
+                "tenant_id": candidate.get("tenant_id") or candidate.get("organization_id"),
+                "technician_id": candidate.get("technician_id"),
+                "error": str(outcome),
             }
-            for outcome in offer_results:
-                if isinstance(outcome, Exception):
-                    logger.exception("Broadcast offer creation failed", exc_info=outcome)
-        else:
-            state["candidates"] = [
-                candidate for candidate in all_candidates
-                if int(candidate["technician_id"]) in successful_ids
-            ]
-            state["all_candidates"] = state["candidates"]
-            state["offers_broadcast"] = True
-            result = await self.graph.start_dispatch(state)
-        self._persist_dispatch_state(job_id, result)
-        if result.get("error"):
-            logger.error(
-                "dispatch_failed job_id=%s technician_id=%s dispatch_attempt_id=%s outcome=failed reason=%s",
-                job_id,
-                result.get("current_technician_id"),
-                dispatch_attempt_id,
-                result.get("error"),
-            )
-        return result
+            for candidate, outcome in zip(candidates, outcomes)
+            if isinstance(outcome, Exception) and not isinstance(outcome, WorkloadLimitReached)
+        ]
+        workload_excluded_identities.update(
+            identity
+            for identity in (self._candidate_identity(candidate) for candidate in workload_skipped)
+            if identity is not None
+        )
+        state["workload_excluded_technicians"] = [
+            self._identity_payload(item)
+            for item in sorted(workload_excluded_identities)
+        ]
+        state["current_batch_technicians"] = [
+            self._identity_payload(identity)
+            for identity in (self._candidate_identity(c) for c in successful)
+            if identity is not None
+        ]
+        state["failed_offer_attempts"] = failed
+        state["workload_skipped_count"] = len(workload_skipped)
+        state["next_action"] = "WAITING_FOR_ALL_OFFERS" if successful else "REPLAN_AFTER_WORKLOAD_FILTER" if workload_skipped and not failed else "NO_OFFERS_CREATED"
+        state["status"] = "OFFERS_BROADCAST" if successful else "NO_ELIGIBLE_TECHNICIANS" if workload_skipped and not failed else "OFFER_CREATION_FAILED"
+        self._persist_dispatch_state(job_id, state)
+
+        logger.info(
+            "broadcast_complete job_id=%s eligible=%s offers_created=%s offers_failed=%s",
+            job_id, len(candidates), len(successful), len(failed),
+        )
+        if not successful:
+            # A workload-excluded technician was never offered. Ask Planning for
+            # the next eligible pool instead of treating that candidate as a
+            # rejected/timed-out offer. Tenant-scoped identities avoid excluding
+            # another organization's technician with the same numeric ID.
+            if workload_skipped and not failed:
+                next_candidates = await self.request_planning(
+                    job_id,
+                    [
+                        self._identity_payload(item)
+                        for item in sorted(attempted_identities | workload_excluded_identities)
+                    ],
+                )
+                if next_candidates:
+                    return await self.start_dispatch(
+                        job_id,
+                        initial_candidates=next_candidates,
+                        dispatch_attempt_id=dispatch_attempt_id,
+                    )
+
+            # No offer was persisted and no additional Planning candidates
+            # were found. Re-check/attempt force assignment before cancellation.
+            state["dispatch_exhausted"] = True
+            state["next_action"] = "FORCE_ASSIGNMENT"
+
+            force_result = await self._try_force_assignment(job_id, state)
+            if force_result is not None:
+                return force_result
+
+            state["next_action"] = "DISPATCH_EXHAUSTED"
+            with SessionLocal() as db:
+                fresh = self._get_job(db, job_id)
+                if fresh and getattr(fresh, "assigned_technician_id", None) is None:
+                    self._mark_dispatch_exhausted(job_id, state)
+        return state
 
     async def resume_dispatch(
         self,
@@ -367,67 +371,140 @@ class DispatcherRuntime:
         job_id: int,
         event: str,
         technician_id: int | None = None,
+        technician_tenant_id: str | None = None,
     ) -> dict[str, Any]:
-        """
-        Resume a paused DispatcherGraph.
+        """Serialize broadcast coordination so simultaneous responses cannot advance twice."""
+        from app.services.distributed_lock_service import with_job_lock
 
-        Called by:
-            technician ACCEPT
-            technician REJECT
-            timeout worker
-        """
-
-        allowed_events = {
-            "TECHNICIAN_ACCEPTED",
-            "TECHNICIAN_REJECTED",
-            "TECHNICIAN_TIMEOUT",
-        }
-
-        if event not in allowed_events:
-            raise ValueError(
-                f"Unsupported dispatcher event: {event}"
+        with with_job_lock(str(job_id)):
+            return await self._resume_dispatch_locked(
+                job_id=job_id,
+                event=event,
+                technician_id=technician_id,
+                technician_tenant_id=technician_tenant_id,
             )
 
-        logger.info(
-            "Resuming dispatcher graph job=%s event=%s",
-            job_id,
-            event,
-        )
+    async def _resume_dispatch_locked(
+        self,
+        *,
+        job_id: int,
+        event: str,
+        technician_id: int | None = None,
+        technician_tenant_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Coordinate broadcast responses while holding the job-scoped lock."""
+        allowed = {"TECHNICIAN_ACCEPTED", "TECHNICIAN_REJECTED", "TECHNICIAN_TIMEOUT"}
+        if event not in allowed:
+            raise ValueError(f"Unsupported dispatcher event: {event}")
+
         with SessionLocal() as db:
             job = self._get_job(db, job_id)
-            persisted = getattr(job, "dispatch_state", None) if job else None
-        if isinstance(persisted, dict) and persisted:
-            current_id = persisted.get("current_technician_id")
-            if event == "TECHNICIAN_ACCEPTED" and persisted.get("offers_broadcast") and technician_id is not None:
-                offered_ids = {
-                    int(candidate["technician_id"])
-                    for candidate in persisted.get("all_candidates", [])
-                    if isinstance(candidate, dict) and str(candidate.get("technician_id", "")).isdigit()
-                }
-                if int(technician_id) in offered_ids:
-                    with SessionLocal() as db:
-                        winner = db.query(models.Job).filter(
-                            models.Job.id == job_id,
-                            models.Job.assigned_technician_id == int(technician_id),
-                            models.Job.status.in_(("ASSIGNED", "ACCEPTED")),
-                        ).first()
-                    if winner is not None:
-                        persisted = {**persisted, "current_technician_id": int(technician_id)}
-                        current_id = int(technician_id)
-            if technician_id is not None and current_id != int(technician_id):
-                logger.info(
-                    "Ignoring stale/duplicate dispatcher response job_id=%s technician_id=%s current_technician_id=%s outcome=ignored",
-                    job_id, technician_id, current_id,
-                )
+            if job is None:
+                return {"job_id": job_id, "status": "JOB_NOT_FOUND"}
+            persisted = dict(getattr(job, "dispatch_state", None) or {})
+            assigned_id = getattr(job, "assigned_technician_id", None)
+            job_status = str(getattr(job, "status", "") or "").upper()
+
+            if assigned_id is not None or job_status in NON_DISPATCHABLE_STATUSES:
+                persisted.update({"status": "ASSIGNED", "assigned_technician_id": assigned_id, "next_action": "END"})
+                db.commit()
                 return persisted
-            result = await self.graph.resume_from_persisted_state(persisted, event)
-        else:
-            result = await self.graph.resume_dispatch(job_id=job_id, event=event)
-        self._persist_dispatch_state(job_id, result)
-        if result.get("dispatch_exhausted"):
-            self._mark_dispatch_exhausted(job_id, result)
-        if result.get("pending_retry"):
-            self._mark_pending_for_dispatch_retry(job_id, result)
+
+            if technician_id is not None:
+                tenant_id = technician_tenant_id
+                if tenant_id is None:
+                    matching_tenants = (
+                        db.query(models.JobAssignment.tenant_id)
+                        .filter(
+                            models.JobAssignment.job_id == job_id,
+                            models.JobAssignment.technician_id == int(technician_id),
+                            models.JobAssignment.assigned_at.isnot(None),
+                        )
+                        .distinct()
+                        .all()
+                    )
+                    if len(matching_tenants) == 1:
+                        tenant_id = matching_tenants[0][0]
+
+                if tenant_id is not None:
+                    identity = (str(tenant_id), int(technician_id))
+                    attempted = self._identity_set(persisted.get("attempted_technicians"))
+                    attempted.add(identity)
+                    persisted["attempted_technicians"] = [
+                        self._identity_payload(item) for item in sorted(attempted)
+                    ]
+                    if event == "TECHNICIAN_REJECTED":
+                        rejected = self._identity_set(persisted.get("rejected_technicians"))
+                        rejected.add(identity)
+                        persisted["rejected_technicians"] = [
+                            self._identity_payload(item) for item in sorted(rejected)
+                        ]
+                    job.dispatch_state = DispatcherGraph._persistable_state(persisted)
+                    db.flush()
+                else:
+                    logger.warning(
+                        "dispatch_event_identity_ambiguous job_id=%s technician_id=%s",
+                        job_id, technician_id,
+                    )
+
+            # The Job row is locked first, matching acceptance/rejection/timeout lock order.
+            pending_count = (
+                db.query(models.JobAssignment)
+                .filter(
+                    models.JobAssignment.job_id == job_id,
+                    models.JobAssignment.status == "PENDING",
+                    models.JobAssignment.assigned_at.isnot(None),
+                )
+                .count()
+            )
+            db.commit()
+
+        if pending_count:
+            persisted.update({
+                "status": "WAITING_FOR_OTHER_OFFERS",
+                "pending_offer_count": pending_count,
+                "next_action": "WAIT_FOR_ALL_OFFERS_TERMINAL",
+            })
+            self._persist_dispatch_state(job_id, persisted)
+            return persisted
+
+        # All offers in this broadcast are terminal. Ask Planning for a fresh
+        # ranking excluding every technician already offered this job.
+        attempted_identities = persisted.get("attempted_technicians", [])
+        workload_excluded = persisted.get("workload_excluded_technicians", [])
+        fresh_candidates = await self.request_planning(
+            job_id,
+            list(attempted_identities) + list(workload_excluded),
+        )
+        if not fresh_candidates:
+            # Every offer in the current broadcast is terminal and Planning
+            # has no new candidates. Try the previously ranked/attempted pool
+            # using fresh GPS and appointment checks before cancelling.
+            persisted.update({
+                "dispatch_exhausted": True,
+                "next_action": "FORCE_ASSIGNMENT",
+            })
+
+            force_result = await self._try_force_assignment(
+                job_id,
+                persisted,
+            )
+            if force_result is not None:
+                return force_result
+
+            persisted["next_action"] = "DISPATCH_EXHAUSTED"
+            changed = self._mark_dispatch_exhausted(job_id, persisted)
+            persisted["status"] = (
+                "DISPATCH_EXHAUSTED" if changed else "NOT_RETRYABLE"
+            )
+            return persisted
+
+        # Start the next complete eligible pool. Keep the same dispatch attempt.
+        result = await self.start_dispatch(
+            job_id,
+            initial_candidates=fresh_candidates,
+            dispatch_attempt_id=persisted.get("dispatch_attempt_id"),
+        )
         return result
 
     def _persist_dispatch_state(self, job_id: int, state: dict[str, Any]) -> None:
@@ -444,6 +521,77 @@ class DispatcherRuntime:
                 if hasattr(db, "commit"):
                     db.commit()
 
+
+    async def _try_force_assignment(
+        self,
+        job_id: int,
+        dispatch_state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """
+        Try direct assignment after normal broadcast offers are exhausted.
+
+        Returns updated dispatch state on success.
+        Returns None when no candidate qualifies.
+        """
+
+        try:
+            result = try_force_assign_job(
+                job_id=job_id,
+                dispatch_state=dispatch_state,
+            )
+        except Exception:
+            logger.exception(
+                "force_assignment_failed job_id=%s",
+                job_id,
+            )
+            return None
+
+        if not result.get("assigned"):
+            logger.warning(
+                "force_assignment_unavailable job_id=%s reason=%s",
+                job_id,
+                result.get("reason"),
+            )
+            return None
+
+        state = result["dispatch_state"]
+
+        # The Communication Agent publishes assignment and acceptance
+        # notifications after the status transaction commits. Broadcast the
+        # persisted customer chat message here, matching normal acceptance.
+        chat_message = result.get("chat_message")
+        chat_customer_user_id = result.get("chat_customer_user_id")
+        if chat_message and chat_customer_user_id:
+            try:
+                from app.services.socket_manager import sio
+
+                await sio.emit(
+                    "job_message",
+                    {
+                        "job_id": job_id,
+                        "message": chat_message,
+                    },
+                    room=f"user_{chat_customer_user_id}",
+                )
+            except Exception:
+                logger.exception(
+                    "force_assignment_chat_broadcast_failed "
+                    "job_id=%s customer_user_id=%s",
+                    job_id,
+                    chat_customer_user_id,
+                )
+
+        logger.warning(
+            "dispatcher_force_assignment_completed job_id=%s "
+            "technician_id=%s technician_tenant_id=%s",
+            job_id,
+            result["technician_id"],
+            result["technician_tenant_id"],
+        )
+
+        return state
+
+
     # ------------------------------------------------------------------
     # Planning adapter
     # ------------------------------------------------------------------
@@ -452,7 +600,7 @@ class DispatcherRuntime:
     async def request_planning(
         self,
         job_id: int,
-        excluded_technician_ids: list[int],
+        excluded_technician_ids: list[Any],
     ) -> list[dict[str, Any]]:
         """
         Request a fresh deterministic Planning Graph ranking.
@@ -462,15 +610,12 @@ class DispatcherRuntime:
         the next batch of at most three candidates.
         """
 
-        excluded = {
-            int(technician_id)
-            for technician_id in (excluded_technician_ids or [])
-        }
+        excluded_identities = self._identity_set(excluded_technician_ids)
 
         logger.info(
-            "PLANNING GRAPH REQUEST | job_id=%s | excluded=%s",
+            "PLANNING GRAPH REQUEST | job_id=%s | excluded_tenant_technicians=%s",
             job_id,
-            sorted(excluded),
+            [self._identity_payload(item) for item in sorted(excluded_identities)],
         )
 
         with SessionLocal() as db:
@@ -509,17 +654,17 @@ class DispatcherRuntime:
                 {
                     "job_id": job_id,
                     "job_requirement": job_requirement,
-                    "excluded_technician_ids": sorted(excluded),
+                    # Planning's current exclusion input is numeric-only. Do
+                    # not pass IDs here: that would exclude another tenant's
+                    # technician if numeric IDs overlap. Filter below instead.
+                    "excluded_technician_ids": [],
                 }
             )
             ranked_all = result.get("all_ranked_technicians") or []
 
-            ranked = [
-                t for t in ranked_all
-                if int(t["technician_id"]) not in excluded
-            ]
+            ranked = ranked_all
 
-            log_planning_top3(job_id, ranked, excluded)
+            log_planning_top3(job_id, ranked, excluded_identities)
 
         recommendations = (
             result.get("all_ranked_technicians")
@@ -560,15 +705,15 @@ class DispatcherRuntime:
 
         candidates = self._normalize_candidates(
             raw_candidates,
-            excluded_ids=excluded,
+            excluded_identities=excluded_identities,
         )
 
         logger.info(
             "PLANNING GRAPH RESULT | job_id=%s | "
-            "candidate_count=%s | excluded=%s | candidates=%s",
+            "candidate_count=%s | excluded_tenant_technicians=%s | candidates=%s",
             job_id,
             len(candidates),
-            sorted(excluded),
+            [self._identity_payload(item) for item in sorted(excluded_identities)],
             [
                 {
                     "rank": candidate.get("rank"),
@@ -585,16 +730,16 @@ class DispatcherRuntime:
     @staticmethod
     def _normalize_candidates(
         candidates: list[dict[str, Any]],
-        excluded_ids: set[int],
+        excluded_identities: set[tuple[str, int]],
     ) -> list[dict[str, Any]]:
         """
-        Normalize candidate dictionaries and remove excluded/duplicate IDs.
+        Normalize candidate dictionaries and remove tenant-scoped duplicates.
 
         Candidate order is preserved by rank.
         """
 
         normalized: list[dict[str, Any]] = []
-        seen_ids: set[int] = set()
+        seen_identities: set[tuple[str, int]] = set()
 
         for candidate in candidates or []:
             
@@ -608,6 +753,8 @@ class DispatcherRuntime:
                 elif hasattr(candidate, "technician_id"):
                     candidate_data = {
                         "technician_id": getattr(candidate, "technician_id", None),
+                        "tenant_id": getattr(candidate, "tenant_id", None),
+                        "organization_id": getattr(candidate, "organization_id", None),
                         "rank": getattr(candidate, "rank", None),
                         "confidence": getattr(candidate, "confidence", 0.0),
                         "estimated_eta": getattr(candidate, "estimated_eta", 0),
@@ -631,10 +778,18 @@ class DispatcherRuntime:
                 )
                 continue
 
-            if technician_id in excluded_ids:
+            tenant_id = candidate.get("tenant_id") or candidate.get("organization_id")
+            if tenant_id is None:
+                logger.warning(
+                    "Skipping planning candidate without tenant/organization identity: %r",
+                    candidate,
+                )
+                continue
+            identity = (str(tenant_id), technician_id)
+            if identity in excluded_identities:
                 continue
 
-            if technician_id in seen_ids:
+            if identity in seen_identities:
                 continue
 
             try:
@@ -671,7 +826,7 @@ class DispatcherRuntime:
                 "estimated_eta": estimated_eta,
             })
 
-            seen_ids.add(technician_id)
+            seen_identities.add(identity)
 
         normalized.sort(key=lambda candidate: candidate["rank"])
 
@@ -689,11 +844,8 @@ class DispatcherRuntime:
         """
         Offer a job to a real technician.
 
-        This retains the existing behavior from the supplied code:
-        the job is marked ASSIGNED and committed before acceptance.
-
-        Verify this behavior against the technician portal's acceptance
-        and rejection handlers before changing the assignment lifecycle.
+        Create one technician-scoped PENDING offer. This does not assign the Job.
+        The acceptance service atomically selects the first winner.
         """
 
         job_id = self._job_id_from_offer_state(job_state)
@@ -741,15 +893,16 @@ class DispatcherRuntime:
                 ),
             )
 
-            technician = (
-                db.query(models.Technician)
-                .filter(
-                    models.Technician.technician_id
-                    == technician_id,
-                )
-                .with_for_update()
-                .first()
+            candidate = job_state.get("_candidate") or {}
+            candidate_tenant_id = candidate.get("organization_id") or candidate.get("tenant_id")
+            technician_query = db.query(models.Technician).filter(
+                models.Technician.technician_id == technician_id,
             )
+            if candidate_tenant_id is not None:
+                technician_query = technician_query.filter(
+                    models.Technician.tenant_id == str(candidate_tenant_id)
+                )
+            technician = technician_query.with_for_update().first()
 
             logger.warning(
                 "OFFER JOB TECHNICIAN RESOLVED | "
@@ -770,18 +923,32 @@ class DispatcherRuntime:
                     f"for job {job_id}"
                 )
 
-            tech_tenant_id = getattr(technician, "tenant_id", None)
-            if not tech_tenant_id:
-                raise RuntimeError("planning_candidate_missing_tenant")
-            if str(tech_tenant_id) != str(getattr(job, "tenant_id", None)):
+            # The technician row is locked above. Use the persisted workload
+            # column as the dispatch source of truth. This is deliberately the
+            # same value administrators can inspect/update in technicians.current_jobs.
+            technician_tenant_id = str(technician.tenant_id)
+            active_workload = max(0, int(getattr(technician, "current_jobs", 0) or 0))
+            if active_workload >= 5:
                 logger.info(
-                    "CROSS-TENANT OFFER: Updating job tenant_id from %s to technician tenant_id %s | job=%s technician=%s",
-                    getattr(job, "tenant_id", None),
-                    tech_tenant_id,
+                    "dispatch_candidate_skipped job_id=%s technician_id=%s "
+                    "tenant_id=%s active_workload=%s limit=5 reason=workload_limit",
                     job_id,
-                    technician_id,
+                    technician.technician_id,
+                    technician_tenant_id,
+                    active_workload,
                 )
-                job.tenant_id = tech_tenant_id
+                raise WorkloadLimitReached(
+                    f"technician_workload_limit_reached:{active_workload}/5"
+                )
+
+            logger.info(
+                "dispatch_candidate_eligible job_id=%s technician_id=%s "
+                "tenant_id=%s active_workload=%s limit=5",
+                job_id,
+                technician.technician_id,
+                technician_tenant_id,
+                active_workload,
+            )
 
             # Persist an active offer without reserving the job. PostgreSQL
             # selects the winner later in accept_broadcast_offer.
@@ -792,6 +959,7 @@ class DispatcherRuntime:
                     models.JobAssignment.technician_id == technician.technician_id,
                     models.JobAssignment.tenant_id == technician.tenant_id,
                     models.JobAssignment.status == "PENDING",
+                    models.JobAssignment.assigned_at.isnot(None),
                 )
                 .first()
             )
@@ -800,7 +968,7 @@ class DispatcherRuntime:
                     job_id=job_id,
                     tenant_id=str(technician.tenant_id),
                     technician_id=technician.technician_id,
-                    rank=int(job_state.get("current_index", 0)) + 1,
+                    rank=int(job_state.get("_candidate_rank") or candidate.get("rank") or 1),
                     status="PENDING",
                     assigned_at=datetime.now(timezone.utc),
                     is_current=True,
@@ -890,6 +1058,20 @@ class DispatcherRuntime:
                     job_id,
                 )
                 raise
+
+            # Start an independent acceptance timer for this technician's offer.
+            redis_client = get_redis_client()
+            if redis_client is not None:
+                TimerService.start_timer(
+                    redis_client,
+                    str(job_id),
+                    str(technician.technician_id),
+                )
+            else:
+                logger.error(
+                    "offer_timer_not_started job_id=%s technician_id=%s reason=redis_unavailable",
+                    job_id, technician_id,
+                )
 
             # The in-app card above does not deliver a mobile push. Send
             # the native FCM notification only after the assignment commits.
@@ -1188,6 +1370,27 @@ class DispatcherRuntime:
                 return False
             if getattr(job, "assigned_technician_id", None) is not None:
                 return False
+
+            # Database state is authoritative. A post-commit timer/push/socket
+            # failure must never cause a persisted pending offer to be treated
+            # as if offer creation failed.
+            pending_offer_exists = (
+                db.query(models.JobAssignment.id)
+                .filter(
+                    models.JobAssignment.job_id == job_id,
+                    models.JobAssignment.status == "PENDING",
+                    models.JobAssignment.assigned_at.isnot(None),
+                )
+                .first()
+                is not None
+            )
+            if pending_offer_exists:
+                logger.info(
+                    "dispatch_exhaustion_deferred job_id=%s reason=pending_offers_exist",
+                    job_id,
+                )
+                return False
+
             job.status = "CANCELLED"
             job.cancellation_reason = "All ranked eligible technicians exhausted / timed out / rejected offer"
             job.cancelled_at = datetime.now(timezone.utc)

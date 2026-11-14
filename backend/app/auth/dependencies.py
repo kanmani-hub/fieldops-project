@@ -491,30 +491,36 @@ def require_permission(
     ) -> AuthenticatedUser:
 
         for permission in required_permissions:
+            allowed = current_user.has_permission(permission)
 
-            if not current_user.has_permission(
-                permission
-            ):
+            # Temporary diagnostic log: this records the role and
+            # permission decision without exposing JWTs or secrets.
+            logger.info(
+                "AUTH CHECK | user=%s | role=%s | role_type=%s | "
+                "permission=%s | allowed=%s",
+                current_user.user_id,
+                current_user.role,
+                type(current_user.role).__name__,
+                permission.value,
+                allowed,
+            )
+
+            if not allowed:
                 logger.warning(
-                    "Permission denied: "
-                    "user=%s role=%s permission=%s",
+                    "Permission denied: user=%s role=%s permission=%s",
                     current_user.user_id,
-                    current_user.role.value,
+                    current_user.role,
                     permission.value,
                 )
 
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail=(
-                        "Permission denied: "
-                        f"{permission.value}"
-                    ),
+                    detail=f"Permission denied: {permission.value}",
                 )
 
         return current_user
 
     return checker
-
 
 def require_same_tenant_or_super_admin(
     resource_tenant_id: str,

@@ -22,6 +22,9 @@ import { colors } from "../src/theme";
 type Point = { latitude: number; longitude: number };
 
 const DEFAULT_CENTER: Point = { latitude: 13.0827, longitude: 80.2707 };
+const SERVICE_RADIUS_KM = 100;
+const SERVICE_RADIUS_METERS = SERVICE_RADIUS_KM * 1000;
+const OUT_OF_RANGE_MESSAGE = "Select a location within 100 km of Chennai. We do not provide service outside this area.";
 const OLA_STYLE_URL =
   "https://api.olamaps.io/tiles/vector/v1/styles/default-light-standard/style.json";
 
@@ -46,9 +49,21 @@ function validPoint(latitude: unknown, longitude: unknown): Point | null {
   return { latitude: lat, longitude: lng };
 }
 
+function isWithinServiceArea(point: Point): boolean {
+  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+  const latitudeDelta = toRadians(point.latitude - DEFAULT_CENTER.latitude);
+  const longitudeDelta = toRadians(point.longitude - DEFAULT_CENTER.longitude);
+  const a = Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(toRadians(DEFAULT_CENTER.latitude)) * Math.cos(toRadians(point.latitude)) *
+    Math.sin(longitudeDelta / 2) ** 2;
+  const distanceKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return distanceKm <= SERVICE_RADIUS_KM;
+}
+
 function createPickerHtml(apiKey: string, center: Point): string {
   const safeKey = JSON.stringify(apiKey);
   const safeCenter = JSON.stringify([center.longitude, center.latitude]);
+  const safeServiceCenter = JSON.stringify([DEFAULT_CENTER.longitude, DEFAULT_CENTER.latitude]);
 
   return `<!doctype html>
 <html lang="en">
@@ -69,6 +84,8 @@ function createPickerHtml(apiKey: string, center: Point): string {
   const apiKey = ${safeKey};
   const styleUrl = ${JSON.stringify(OLA_STYLE_URL)};
   const initialCenter = ${safeCenter};
+  const serviceCenter = ${safeServiceCenter};
+  const serviceRadiusMeters = ${SERVICE_RADIUS_METERS};
   let olaSdk = null;
   let map = null;
   let marker = null;
@@ -90,6 +107,18 @@ function createPickerHtml(apiKey: string, center: Point): string {
     if (!Number.isFinite(lat) || !Number.isFinite(lng) ||
         lat < -90 || lat > 90 || lng < -180 || lng > 180 ||
         (lat === 0 && lng === 0) || !map || !olaSdk) return;
+
+    const radians = function (degrees) { return degrees * Math.PI / 180; };
+    const latDelta = radians(lat - serviceCenter[1]);
+    const lngDelta = radians(lng - serviceCenter[0]);
+    const a = Math.sin(latDelta / 2) * Math.sin(latDelta / 2) +
+      Math.cos(radians(serviceCenter[1])) * Math.cos(radians(lat)) *
+      Math.sin(lngDelta / 2) * Math.sin(lngDelta / 2);
+    const distanceMeters = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    if (distanceMeters > serviceRadiusMeters) {
+      notify({ type: "out-of-range" });
+      return;
+    }
 
     if (marker) {
       try { marker.remove(); } catch (_) {}
@@ -183,12 +212,18 @@ export default function LocationPickerScreen() {
     [initialLatitude, initialLongitude],
   );
 
-  const [mapCenter, setMapCenter] = useState<Point>(existingPoint || DEFAULT_CENTER);
-  const [selectedPoint, setSelectedPoint] = useState<Point | null>(existingPoint);
+  const [mapCenter, setMapCenter] = useState<Point>(
+    existingPoint && isWithinServiceArea(existingPoint) ? existingPoint : DEFAULT_CENTER,
+  );
+  const [selectedPoint, setSelectedPoint] = useState<Point | null>(
+    existingPoint && isWithinServiceArea(existingPoint) ? existingPoint : null,
+  );
   const [searchText, setSearchText] = useState(initialAddress);
   const [searchResults, setSearchResults] = useState<LocationSearchResult[]>([]);
   const [searchBusy, setSearchBusy] = useState(false);
-  const [searchError, setSearchError] = useState("");
+  const [searchError, setSearchError] = useState(
+    existingPoint && !isWithinServiceArea(existingPoint) ? OUT_OF_RANGE_MESSAGE : "",
+  );
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -287,7 +322,12 @@ export default function LocationPickerScreen() {
         setMapError("");
       } else if (message.type === "selection") {
         const point = validPoint(message.latitude, message.longitude);
-        if (point) setSelectedPoint(point);
+        if (point) {
+          setSearchError("");
+          setSelectedPoint(point);
+        }
+      } else if (message.type === "out-of-range") {
+        setSearchError(OUT_OF_RANGE_MESSAGE);
       } else if (message.type === "error") {
         setMapError(message.message || "Ola Maps failed to load.");
       }
@@ -299,6 +339,11 @@ export default function LocationPickerScreen() {
   const chooseSearchResult = (result: LocationSearchResult) => {
     const point = validPoint(result.latitude, result.longitude);
     if (!point) return;
+    if (!isWithinServiceArea(point)) {
+      setSearchError(OUT_OF_RANGE_MESSAGE);
+      setSearchResults([]);
+      return;
+    }
     setSelectedPoint(point);
     setMapCenter(point);
     setSearchText(result.formatted_address);
@@ -324,6 +369,10 @@ export default function LocationPickerScreen() {
         setSearchError("Your device did not return a valid current location.");
         return;
       }
+      if (!isWithinServiceArea(point)) {
+        setSearchError(OUT_OF_RANGE_MESSAGE);
+        return;
+      }
       setSelectedPoint(point);
       setMapCenter(point);
     } catch {
@@ -333,6 +382,10 @@ export default function LocationPickerScreen() {
 
   const confirmSelection = async () => {
     if (!selectedPoint) return;
+    if (!isWithinServiceArea(selectedPoint)) {
+      setSearchError(OUT_OF_RANGE_MESSAGE);
+      return;
+    }
 
     setConfirming(true);
     setSearchError("");
@@ -422,7 +475,7 @@ export default function LocationPickerScreen() {
           </Pressable>
           <View style={styles.headerText}>
             <Text style={styles.title}>Change location</Text>
-            <Text style={styles.subtitle}>Choose the service address on Ola Maps</Text>
+            <Text style={styles.subtitle}>Choose an address within 100 km of Chennai</Text>
           </View>
         </View>
 

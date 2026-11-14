@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { AppState, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
@@ -19,6 +20,11 @@ function isAwaitingAcceptance(job: TechnicianJob): boolean {
   return ["ASSIGNED", "ACTIVE", "PENDING", "AWAITING_ACCEPTANCE"].includes(
     job.status.trim().toUpperCase().replace(/[ -]+/g, "_")
   );
+}
+
+function isForceAssignedAccepted(job: TechnicianJob): boolean {
+  return job.assigned_by === "SYSTEM_FORCE_ASSIGNMENT" &&
+    job.status.trim().toUpperCase() === "ACCEPTED";
 }
 
 function getDeadline(job: TechnicianJob): number | null {
@@ -86,11 +92,28 @@ export function TechnicianJobAssignmentOffer() {
   const [customerCoordinates, setCustomerCoordinates] = useState<{ latitude: number; longitude: number } | null>(null);
   const [distanceLoading, setDistanceLoading] = useState(false);
   const handledOfferIds = useRef(new Set<string>());
+  const handledOffersLoaded = useRef(false);
+  const handledOffersStorageKey = `technician.assignment-offer-dismissals:${user?.tenant_id ?? "unknown"}:${user?.id ?? "unknown"}`;
 
   useEffect(() => {
     handledOfferIds.current.clear();
+    handledOffersLoaded.current = false;
     setOffer(null);
-  }, [user?.id, user?.tenant_id]);
+    let active = true;
+    void AsyncStorage.getItem(handledOffersStorageKey).then((stored) => {
+      if (!active) return;
+      try {
+        const ids = JSON.parse(stored || "[]");
+        if (Array.isArray(ids)) handledOfferIds.current = new Set(ids.map(String));
+      } catch {
+        handledOfferIds.current = new Set();
+      }
+      handledOffersLoaded.current = true;
+    }).catch(() => {
+      if (active) handledOffersLoaded.current = true;
+    });
+    return () => { active = false; };
+  }, [handledOffersStorageKey]);
 
   useEffect(() => {
     if (!user || user.role.toLowerCase() !== "technician") return;
@@ -98,19 +121,20 @@ export function TechnicianJobAssignmentOffer() {
     let requestInFlight = false;
 
     const checkForOffer = async () => {
-      if (!active || requestInFlight || AppState.currentState !== "active") return;
+      if (!active || requestInFlight || !handledOffersLoaded.current || AppState.currentState !== "active") return;
       requestInFlight = true;
       try {
         const jobs = await getTechnicianJobOffers();
         if (!active) return;
         setOffer((current) => {
-          if (current && isAwaitingAcceptance(current)) {
+          if (current && (isAwaitingAcceptance(current) || isForceAssignedAccepted(current))) {
             const latest = jobs.find((job) => String(job.id) === String(current.id));
-            if (latest && isAwaitingAcceptance(latest)) return latest;
+            if (latest && (isAwaitingAcceptance(latest) || isForceAssignedAccepted(latest))) return latest;
             return null;
           }
           const nextOffer = jobs.find((job) =>
-            isAwaitingAcceptance(job) && !handledOfferIds.current.has(String(job.id))
+            (isAwaitingAcceptance(job) || isForceAssignedAccepted(job)) &&
+            !handledOfferIds.current.has(getOfferKey(job))
           );
           return nextOffer ?? null;
         });
@@ -220,6 +244,7 @@ export function TechnicianJobAssignmentOffer() {
   }, [technicianLocation, customerCoordinates]);
 
   const deadline = offer ? getDeadline(offer) : null;
+  const isForceAssigned = offer ? isForceAssignedAccepted(offer) : false;
   const secondsRemaining = deadline === null ? null : Math.max(0, Math.floor((deadline - now) / 1000));
   const expired = secondsRemaining === 0;
   const distanceKm = technicianLocation && customerCoordinates
@@ -239,7 +264,8 @@ export function TechnicianJobAssignmentOffer() {
           : {}
       );
       const jobId = String(offer.id);
-      handledOfferIds.current.add(jobId);
+      if (action === "reject") await dismissOffer(offer);
+      else handledOfferIds.current.add(getOfferKey(offer));
       setOffer(null);
       if (action === "accept") {
         router.push({ pathname: "/(app)/jobs/[jobId]", params: { jobId } });
@@ -250,6 +276,25 @@ export function TechnicianJobAssignmentOffer() {
       setBusy(null);
     }
   }
+
+  function getOfferKey(job: TechnicianJob): string {
+    return `${String(job.id)}@${job.assigned_at || ""}`;
+  }
+
+  async function dismissOffer(job: TechnicianJob) {
+    handledOfferIds.current.add(getOfferKey(job));
+    try {
+      await AsyncStorage.setItem(handledOffersStorageKey, JSON.stringify([...handledOfferIds.current].slice(-200)));
+    } catch {
+      // Keep the offer dismissed for this app session if persistence is unavailable.
+    }
+  }
+
+  useEffect(() => {
+    if (!offer || isForceAssignedAccepted(offer) || !expired) return;
+    void dismissOffer(offer);
+    setOffer(null);
+  }, [offer, expired]);
 
   if (!offer) return null;
 
@@ -262,17 +307,18 @@ export function TechnicianJobAssignmentOffer() {
           <View style={styles.headingRow}>
             <View style={styles.newJobIcon}><Ionicons name="briefcase" size={25} color="#FFFFFF" /></View>
             <View style={styles.headingText}>
-              <Text style={styles.eyebrow}>NEW JOB REQUEST</Text>
-              <Text style={styles.title}>You’ve got a job</Text>
+              <Text style={styles.eyebrow}>{isForceAssigned ? "FORCE ASSIGNED" : "NEW JOB REQUEST"}</Text>
+              <Text style={styles.title}>{isForceAssigned ? "Job accepted for you" : "You’ve got a job"}</Text>
             </View>
-            <View style={[styles.timer, expired && styles.timerExpired]}>
+            {!isForceAssigned ? <View style={[styles.timer, expired && styles.timerExpired]}>
               <Ionicons name="time-outline" size={16} color={expired ? "#B42332" : "#087653"} />
               <Text style={[styles.timerText, expired && styles.timerTextExpired]}>{formatCountdown(secondsRemaining)}</Text>
-            </View>
+            </View> : null}
             <Pressable accessibilityRole="button" accessibilityLabel="Close job offer" hitSlop={10} onPress={() => {
-              if (offer) handledOfferIds.current.add(String(offer.id));
+              if (offer) void dismissOffer(offer);
               setOffer(null);
               setError(null);
+              router.push("/(app)/jobs" as never);
             }} style={styles.closeButton}>
               <Ionicons name="close" size={23} color="#64748B" />
             </Pressable>
@@ -305,17 +351,29 @@ export function TechnicianJobAssignmentOffer() {
             </View>
           </View>
 
-          <Text style={styles.prompt}>Can you take this job?</Text>
+          <Text style={styles.prompt}>{isForceAssigned ? "This job is accepted and ready to start." : "Can you take this job?"}</Text>
           {error ? <Text accessibilityRole="alert" style={styles.errorText}>{error}</Text> : null}
-          <View style={styles.actions}>
+          {isForceAssigned ? <Pressable accessibilityRole="button" onPress={() => {
+            const jobId = String(offer.id);
+            void dismissOffer(offer);
+            setOffer(null);
+            router.push({ pathname: "/(app)/jobs/[jobId]", params: { jobId } });
+          }} style={({ pressed }) => [styles.acceptButton, pressed && styles.buttonPressed]}>
+            <Ionicons name="arrow-forward" size={20} color="#FFFFFF" />
+            <Text style={styles.acceptText}>View Accepted Job</Text>
+          </Pressable> : <View style={styles.actions}>
             <Pressable accessibilityRole="button" disabled={busy !== null} onPress={() => void handleOfferAction("reject")} style={({ pressed }) => [styles.declineButton, pressed && styles.buttonPressed, busy !== null && styles.disabled]}>
               {busy === "reject" ? <Text style={styles.declineText}>Rejecting…</Text> : <><Ionicons name="close" size={19} color="#FFFFFF" /><Text style={styles.declineText}>Reject</Text></>}
             </Pressable>
             <Pressable accessibilityRole="button" disabled={busy !== null || expired} onPress={() => void handleOfferAction("accept")} style={({ pressed }) => [styles.acceptButton, pressed && styles.buttonPressed, (busy !== null || expired) && styles.disabled]}>
               {busy === "accept" ? <Text style={styles.acceptText}>Accepting…</Text> : <><Ionicons name="checkmark" size={20} color="#FFFFFF" /><Text style={styles.acceptText}>{expired ? "Offer expired" : "Accept Job"}</Text></>}
             </Pressable>
-          </View>
-          <Text style={styles.footerNote}>Respond before the timer runs out.</Text>
+          </View>}
+          <Text style={styles.footerNote}>
+            {isForceAssigned
+              ? "This accepted job is available in your assigned jobs."
+              : "Respond before the timer runs out."}
+          </Text>
           </ScrollView>
         </View>
       </View>

@@ -8,7 +8,7 @@ from .services.ai.FieldOpsAI.agents.dispatcher_agent.dispatcher_runtime import (
 )
 
 from .database import SessionLocal
-from .models import Technician, DispatcherNotification, InAppNotification, Job, SLAEscalation
+from .models import Technician, DispatcherNotification, InAppNotification, Job, JobAssignment, SLAEscalation
 from .redis_client import get_redis_client
 from .logger import logger
 from .services.timer_service import TimerService
@@ -50,39 +50,224 @@ def cleanup_old_notifications():
         db.close()
 
 def checkment_timers():
-    """
-    Check automatic technician-assignment timers.
+    """Expire broadcast offers in batches and preserve legacy timer behavior.
 
-    Responsibilities:
-    - Detect imminent timeout and send pre-alerts.
-    - Preserve existing legacy redispatch behaviour for:
-        * technician offline
-        * SLA risk
-    - For normal acceptance timeout, resume the LangGraph
-      DispatcherRuntime with TECHNICIAN_TIMEOUT.
-    - Never run both the legacy redispatch flow and the
-      LangGraph timeout flow for the same timeout.
+    Broadcast timeout decisions are based on JobAssignment.assigned_at, not
+    Redis key expiry. All expired offers for one job are updated under one
+    job lock. The dispatcher is resumed once, after releasing that lock, so
+    it can wait for all remaining offers or advance to fresh Planning.
     """
-
     db = SessionLocal()
-    redis_client = get_redis_client()
-
-    if not redis_client:
-        db.close()
-        return
+    redis_client = None
+    expired_by_job = {}
 
     try:
-        # Redis connectivity check.
+        # Redis is useful for timer cleanup and legacy timers. Its health check
+        # must not prevent DB-timestamp-based broadcast expiry from running.
         try:
-            if redis_client.ping() is None:
-                db.close()
-                return
-        except Exception as redis_error:
-            logger.error(
-                "Assignment timer checker: Redis unavailable: %s",
-                redis_error,
+            candidate_redis = get_redis_client()
+            if candidate_redis is not None and candidate_redis.ping():
+                redis_client = candidate_redis
+            else:
+                logger.warning(
+                    "TIMEOUT_CHECKER: Redis unavailable; broadcast expiry will "
+                    "continue using database timestamps"
+                )
+        except Exception:
+            logger.exception(
+                "TIMEOUT_CHECKER: Redis health check failed; continuing "
+                "broadcast expiry using database timestamps"
             )
-            db.close()
+
+        now = datetime.now(timezone.utc)
+        duration = int(TimerService.ACCEPTANCE_DURATION_SECONDS)
+        cutoff = now - timedelta(seconds=duration)
+
+        logger.info("TIMEOUT_CHECKER: started")
+
+        # -------------------------------------------------------------
+        # 1. Broadcast offers: find expired PENDING rows from the DB.
+        # -------------------------------------------------------------
+        pending_offers = (
+            db.query(JobAssignment)
+            .filter(
+                JobAssignment.status == "PENDING",
+                JobAssignment.assigned_at.isnot(None),
+                JobAssignment.assigned_at <= cutoff,
+            )
+            .order_by(JobAssignment.job_id.asc(), JobAssignment.id.asc())
+            .all()
+        )
+
+        logger.info(
+            "TIMEOUT_CHECKER: found %s expired pending broadcast offers",
+            len(pending_offers),
+        )
+
+        # Group by job so each job lock and dispatcher coordination run once
+        # per scheduler pass, even when several technicians expire together.
+        job_ids = sorted({int(row.job_id) for row in pending_offers})
+
+        for job_id in job_ids:
+            timed_out_technicians = []
+
+            try:
+                with with_job_lock(str(job_id)):
+                    locked_job = (
+                        db.query(Job)
+                        .filter(Job.id == job_id)
+                        .with_for_update()
+                        .first()
+                    )
+
+                    if locked_job is None:
+                        logger.warning(
+                            "broadcast_timeout_job_missing job_id=%s",
+                            job_id,
+                        )
+                        db.rollback()
+                        continue
+
+                    # If a technician has already accepted, do not modify
+                    # remaining offers here. The acceptance transaction owns
+                    # winner/LOST transitions.
+                    if locked_job.assigned_technician_id is not None:
+                        logger.info(
+                            "broadcast_timeout_skipped_winner_exists job_id=%s "
+                            "winner=%s",
+                            job_id,
+                            locked_job.assigned_technician_id,
+                        )
+                        db.rollback()
+                        continue
+
+                    locked_offers = (
+                        db.query(JobAssignment)
+                        .filter(
+                            JobAssignment.job_id == job_id,
+                            JobAssignment.status == "PENDING",
+                            JobAssignment.assigned_at.isnot(None),
+                            JobAssignment.assigned_at <= cutoff,
+                        )
+                        .order_by(JobAssignment.id.asc())
+                        .with_for_update()
+                        .all()
+                    )
+
+                    # Recheck each row while holding the database locks.
+                    # This also handles databases that return naive datetimes.
+                    for locked_offer in locked_offers:
+                        assigned_at = locked_offer.assigned_at
+                        if assigned_at.tzinfo is None:
+                            assigned_at = assigned_at.replace(
+                                tzinfo=timezone.utc
+                            )
+                        else:
+                            assigned_at = assigned_at.astimezone(timezone.utc)
+
+                        if datetime.now(timezone.utc) < (
+                            assigned_at + timedelta(seconds=duration)
+                        ):
+                            continue
+
+                        locked_offer.status = "TIMEOUT"
+                        locked_offer.responded_at = datetime.now(timezone.utc)
+                        locked_offer.is_current = False
+                        timed_out_technicians.append(
+                            int(locked_offer.technician_id)
+                        )
+
+                    if timed_out_technicians:
+                        db.commit()
+                    else:
+                        db.rollback()
+
+                # The distributed lock has been released before Redis cleanup
+                # and dispatcher resume. Never nest resume_dispatch's job lock.
+                if timed_out_technicians:
+                    expired_by_job[job_id] = sorted(
+                        set(timed_out_technicians)
+                    )
+
+                    if redis_client is not None:
+                        for technician_id in expired_by_job[job_id]:
+                            try:
+                                TimerService.cancel_timer(
+                                    redis_client,
+                                    str(job_id),
+                                    str(technician_id),
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "broadcast_timeout_timer_cleanup_failed "
+                                    "job_id=%s technician_id=%s",
+                                    job_id,
+                                    technician_id,
+                                )
+
+                    logger.info(
+                        "broadcast_offers_timed_out job_id=%s "
+                        "technician_ids=%s count=%s",
+                        job_id,
+                        expired_by_job[job_id],
+                        len(expired_by_job[job_id]),
+                    )
+
+            except HTTPException as exc:
+                db.rollback()
+                if exc.status_code == 409:
+                    logger.warning(
+                        "TIMEOUT_CHECKER: job lock busy; will retry next run "
+                        "job_id=%s",
+                        job_id,
+                    )
+                    continue
+                raise
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "broadcast_timeout_processing_failed job_id=%s",
+                    job_id,
+                )
+
+        # One coordination call per job. Passing technician_id=None is
+        # intentional: DispatcherRuntime reconstructs attempted technician
+        # identities from the committed JobAssignment history. This prevents
+        # seven simultaneous expirations from causing seven replanning runs.
+        for job_id, technician_ids in expired_by_job.items():
+            try:
+                logger.info(
+                    "TIMEOUT_CHECKER: resuming dispatcher job_id=%s "
+                    "timed_out_technicians=%s",
+                    job_id,
+                    technician_ids,
+                )
+                asyncio.run(
+                    get_dispatcher_runtime().resume_dispatch(
+                        job_id=job_id,
+                        event="TECHNICIAN_TIMEOUT",
+                        technician_id=None,
+                    )
+                )
+                logger.info(
+                    "broadcast_timeout_coordination_completed job_id=%s",
+                    job_id,
+                )
+            except Exception:
+                logger.exception(
+                    "broadcast_timeout_coordination_failed job_id=%s",
+                    job_id,
+                )
+
+        # -------------------------------------------------------------
+        # 2. Legacy single-assignee jobs. Keep the existing offline/SLA
+        # redispatch behavior for older records using job-scoped timers.
+        # -------------------------------------------------------------
+        if redis_client is None:
+            logger.debug(
+                "TIMEOUT_CHECKER: skipping legacy Redis timer scan because "
+                "Redis is unavailable"
+            )
             return
 
         assigned_jobs = (
@@ -97,83 +282,43 @@ def checkment_timers():
             warned_key = f"job:timer_warned:{job.id}"
 
             timer_exists = bool(redis_client.exists(timer_key))
-            warning_exists = bool(redis_client.exists(warning_key))
-            has_warned = bool(redis_client.exists(warned_key))
-
             timer_ttl = (
                 redis_client.ttl(timer_key)
                 if hasattr(redis_client, "ttl")
                 else 0
             )
-
-            # Redis returns:
-            #   -1 = key exists without expiry
-            #   -2 = key does not exist
-            #
-            # Treat either as expired/missing for the trigger detector.
             if timer_ttl is None or timer_ttl < 0:
                 timer_ttl = 0
 
             tech = (
                 db.query(Technician)
                 .filter(
-                    Technician.technician_id
-                    == job.assigned_technician_id
+                    Technician.technician_id == job.assigned_technician_id
                 )
                 .first()
             )
 
-            if not tech:
-                logger.warning(
-                    "Assignment timer: technician not found "
-                    "for job=%s technician_id=%s",
-                    job.id,
-                    job.assigned_technician_id,
-                )
-
-            # ---------------------------------------------------------
-            # Legacy compatibility:
-            # Some old jobs may not have tenant_id populated.
-            # ---------------------------------------------------------
-            if (
-                not job.tenant_id
-                and tech
-                and tech.tenant_id
-            ):
+            if not job.tenant_id and tech and tech.tenant_id:
                 job.tenant_id = tech.tenant_id
                 db.commit()
 
-            # ---------------------------------------------------------
-            # Ask the existing trigger service what happened.
-            # ---------------------------------------------------------
             trigger = ReDispatchTriggerService.detect_trigger(
                 job=job,
                 tech=tech,
                 timer_exists=timer_exists,
                 timer_ttl=timer_ttl,
             )
-
             if not trigger:
                 continue
 
+            legacy_timeout_resume = None
+
             try:
                 with with_job_lock(str(job.id)):
-
-                    # -------------------------------------------------
-                    # Re-load the job after acquiring the distributed
-                    # lock. Another worker/process may have handled it.
-                    # -------------------------------------------------
                     db.refresh(job)
-
                     if str(job.status).upper() != "ASSIGNED":
-                        logger.info(
-                            "Assignment timer: job=%s is no longer "
-                            "ASSIGNED; skipping.",
-                            job.id,
-                        )
                         continue
 
-                    # Re-resolve the current technician after refresh.
                     current_tech = (
                         db.query(Technician)
                         .filter(
@@ -182,299 +327,145 @@ def checkment_timers():
                         )
                         .first()
                     )
-
                     reason = trigger.get("reason")
 
-                    # =================================================
-                    # 1. NORMAL ACCEPTANCE TIMEOUT
-                    #
-                    # This is now handled by LangGraph DispatcherRuntime.
-                    # =================================================
                     if reason == "timeout":
-                        current_technician_id = (
-                            job.assigned_technician_id
-                        )
-
+                        current_technician_id = job.assigned_technician_id
                         if current_technician_id is None:
-                            logger.warning(
-                                "Timeout detected for job=%s but "
-                                "assigned_technician_id is already NULL. "
-                                "Skipping.",
-                                job.id,
-                            )
                             TimerService.cancel_timer(
-                                redis_client,
-                                str(job.id),
+                                redis_client, str(job.id)
                             )
                             continue
 
-                        logger.info(
-                            "Dispatcher timeout: job=%s "
-                            "technician=%s",
-                            job.id,
-                            current_technician_id,
-                        )
-
-                        # -------------------------------------------------
-                        # Cancel the Redis timer first.
-                        #
-                        # DB state remains authoritative.
-                        # -------------------------------------------------
                         TimerService.cancel_timer(
-                            redis_client,
-                            str(job.id),
+                            redis_client, str(job.id)
+                        )
+                        for key in (warning_key, warned_key):
+                            try:
+                                redis_client.delete(key)
+                            except Exception:
+                                logger.warning(
+                                    "Legacy timer warning cleanup failed: %s",
+                                    key,
+                                )
+
+                        assignment = (
+                            db.query(JobAssignment)
+                            .filter(
+                                JobAssignment.job_id == job.id,
+                                JobAssignment.technician_id
+                                == current_technician_id,
+                                JobAssignment.is_current.is_(True),
+                            )
+                            .with_for_update()
+                            .first()
                         )
 
-                        # -------------------------------------------------
-                        # Clear the Redis warning state as well.
-                        # -------------------------------------------------
-                        try:
-                            redis_client.delete(
-                                warning_key,
-                                warned_key,
-                            )
-                        except Exception as redis_cleanup_error:
-                            logger.warning(
-                                "Failed to clean timeout warning keys "
-                                "for job=%s: %s",
-                                job.id,
-                                redis_cleanup_error,
-                            )
+                        if assignment is not None:
+                            assignment.status = "TIMEOUT"
+                            assignment.responded_at = datetime.now(timezone.utc)
+                            assignment.is_current = False
 
-                        # -------------------------------------------------
-                        # Important:
-                        #
-                        # Do NOT call:
-                        #
-                        #   DispatchAgent.trigger_redispatch(...)
-                        #
-                        # here.
-                        #
-                        # LangGraph owns the candidate sequence.
-                        # -------------------------------------------------
-
-                        # Persist the old assignment as a timeout if the
-                        # JobAssignment model is available.
-                        #
-                        # We intentionally do this defensively because
-                        # existing deployments may contain jobs that were
-                        # created before JobAssignment was introduced.
-                        try:
-                            from .models import JobAssignment
-
-                            assignment = (
-                                db.query(JobAssignment)
-                                .filter(
-                                    JobAssignment.job_id == job.id,
-                                    JobAssignment.technician_id
-                                    == current_technician_id,
-                                    JobAssignment.is_current.is_(True),
-                                )
-                                .first()
-                            )
-
-                            if assignment is not None:
-                                assignment.status = "TIMEOUT"
-                                assignment.responded_at = (
-                                    datetime.now(timezone.utc)
-                                )
-                                assignment.is_current = False
-
-                        except Exception as assignment_error:
-                            logger.warning(
-                                "Could not mark JobAssignment timeout "
-                                "for job=%s: %s",
-                                job.id,
-                                assignment_error,
-                            )
-
-                        # -------------------------------------------------
-                        # Clear current assignment before resuming graph.
-                        #
-                        # The next graph candidate must be allowed to
-                        # become the current assignment.
-                        # -------------------------------------------------
                         job.assigned_technician_id = None
+                        job.status = "QUEUED"
 
-                        # Keep the job dispatchable.
-                        #
-                        # Do NOT mark it COMPLETED/CANCELLED.
-                        # The dispatcher will offer the next candidate.
-                        if hasattr(job, "status"):
-                            job.status = "QUEUED"
-
-                        # If the current technician has been counted as
-                        # having an active assignment, release that count.
                         if current_tech is not None:
                             current_jobs = int(
-                                getattr(
-                                    current_tech,
-                                    "current_jobs",
-                                    0,
-                                )
-                                or 0
+                                getattr(current_tech, "current_jobs", 0) or 0
                             )
-
                             if current_jobs > 0:
-                                current_tech.current_jobs = (
-                                    current_jobs - 1
-                                )
+                                current_tech.current_jobs = current_jobs - 1
 
                         db.commit()
+                        legacy_timeout_resume = int(current_technician_id)
 
-                        # -------------------------------------------------
-                        # Resume LangGraph.
-                        #
-                        # DispatcherRuntime.resume_dispatch() is async,
-                        # while APScheduler BackgroundScheduler invokes
-                        # this worker synchronously.
-                        # -------------------------------------------------
-                        runtime = get_dispatcher_runtime()
-
-                        try:
-                            asyncio.run(
-                                runtime.resume_dispatch(
-                                    job_id=int(job.id),
-                                    event="TECHNICIAN_TIMEOUT",
-                                    technician_id=int(current_tech.technician_id) if current_tech is not None else None,
-                                )
+                    elif reason in {"tech_offline", "sla_risk"}:
+                        tenant_id_str = (
+                            job.tenant_id
+                            or (
+                                current_tech.tenant_id
+                                if current_tech and current_tech.tenant_id
+                                else "system"
                             )
-
-                            logger.info(
-                                "Dispatcher graph resumed after timeout "
-                                "for job=%s",
-                                job.id,
-                            )
-
-                        except Exception as dispatch_error:
-                            logger.exception(
-                                "Failed to resume DispatcherGraph after "
-                                "timeout for job=%s: %s",
-                                job.id,
-                                dispatch_error,
-                            )
-
-                            # The old assignment has already been safely
-                            # cleared and the timer cancelled.
-                            #
-                            # Do not call the legacy DispatchAgent here,
-                            # otherwise both dispatch systems can compete.
-                            #
-                            # Leave the job queued for the next explicit
-                            # recovery/retry mechanism.
-
-                        continue
-
-                    # =================================================
-                    # 2. LEGACY OFFLINE / SLA REDISPATCH
-                    #
-                    # Keep existing behaviour for now.
-                    # =================================================
-                    if reason in {"tech_offline", "sla_risk"}:
-                        logger.info(
-                            "ReDispatch: Triggering legacy re-dispatch "
-                            "for job=%s (Reason: %s)",
-                            job.id,
-                            reason,
                         )
-
                         tech_id_str = (
                             current_tech.tech_id
                             if current_tech
                             else str(job.assigned_technician_id)
                         )
 
-                        tenant_id_str = (
-                            job.tenant_id
-                            or (
-                                current_tech.tenant_id
-                                if current_tech
-                                and current_tech.tenant_id
-                                else "system"
-                            )
-                        )
-
-                        queue_result = (
-                            ReDispatchQueueService.enqueue_failed_job(
-                                db=db,
-                                redis_client=redis_client,
-                                job=job,
-                                tenant_id=tenant_id_str,
-                                reason=f"Triggered by: {reason}",
-                                tech_id=tech_id_str,
-                            )
+                        ReDispatchQueueService.enqueue_failed_job(
+                            db=db,
+                            redis_client=redis_client,
+                            job=job,
+                            tenant_id=tenant_id_str,
+                            reason=f"Triggered by: {reason}",
+                            tech_id=tech_id_str,
                         )
 
                         if current_tech:
-                            notif = DispatcherNotification(
-                                tech_id=current_tech.tech_id,
-                                tenant_id=tenant_id_str,
-                                message=(
-                                    f"Job {job.id} assignment revoked "
-                                    f"for {current_tech.technician_name}. "
-                                    f"Reason: {reason}."
-                                ),
+                            db.add(
+                                DispatcherNotification(
+                                    tech_id=current_tech.tech_id,
+                                    tenant_id=tenant_id_str,
+                                    message=(
+                                        f"Job {job.id} assignment revoked for "
+                                        f"{current_tech.technician_name}. "
+                                        f"Reason: {reason}."
+                                    ),
+                                )
                             )
-                            db.add(notif)
                             db.commit()
 
-                        DispatchAgent.trigger_redispatch(
-                            str(job.id)
-                        )
+                        DispatchAgent.trigger_redispatch(str(job.id))
+                        TimerService.cancel_timer(redis_client, str(job.id))
 
+                    else:
+                        logger.warning(
+                            "Unsupported legacy timer trigger reason=%s "
+                            "job_id=%s",
+                            reason,
+                            job.id,
+                        )
                         TimerService.cancel_timer(
-                            redis_client,
-                            str(job.id),
+                            redis_client, str(job.id)
                         )
 
-                        continue
+                # Resume only after releasing the legacy job lock.
+                if legacy_timeout_resume is not None:
+                    try:
+                        asyncio.run(
+                            get_dispatcher_runtime().resume_dispatch(
+                                job_id=int(job.id),
+                                event="TECHNICIAN_TIMEOUT",
+                                technician_id=legacy_timeout_resume,
+                            )
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Legacy dispatcher timeout resume failed "
+                            "job_id=%s",
+                            job.id,
+                        )
 
-                    # =================================================
-                    # 3. UNKNOWN TRIGGER
-                    # =================================================
-                    logger.warning(
-                        "Assignment timer: unsupported trigger "
-                        "reason=%s for job=%s",
-                        reason,
-                        job.id,
-                    )
-
-                    # Avoid leaving a stale timer around for an unknown
-                    # trigger, but do not mutate the job automatically.
-                    TimerService.cancel_timer(
-                        redis_client,
-                        str(job.id),
-                    )
-
-            except HTTPException as e:
-                if e.status_code == 409:
-                    logger.warning(
-                        "ReDispatch: concurrency conflict handling "
-                        "job=%s, skipping.",
-                        job.id,
-                    )
-                    db.rollback()
-                    continue
-
-                raise
-
-            except Exception as job_error:
-                logger.exception(
-                    "Error processing assignment timer for job=%s: %s",
-                    job.id,
-                    job_error,
-                )
+            except HTTPException as exc:
                 db.rollback()
+                if exc.status_code == 409:
+                    continue
+                raise
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Legacy assignment timer failed job_id=%s",
+                    job.id,
+                )
 
-    except Exception as e:
-        logger.exception(
-            "Error checking assignment timers: %s",
-            e,
-        )
+    except Exception:
         db.rollback()
-
+        logger.exception("Error checking assignment timers")
     finally:
         db.close()
+
 
 def check_sla_escalations():
     db = SessionLocal()
@@ -759,7 +750,16 @@ def register_pending_scheduled_dispatches():
 def start_scheduler():
     if not scheduler.running:
         scheduler.add_job(cleanup_old_notifications, 'cron', hour=0, minute=0, id='notification_cleanup')
-        scheduler.add_job(checkment_timers, 'interval', seconds=5, id='timer_checker')
+        scheduler.add_job(
+            checkment_timers,
+            'interval',
+            seconds=5,
+            id='timer_checker',
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+            replace_existing=True,
+        )
         scheduler.add_job(check_sla_escalations, 'interval', seconds=10, id='sla_escalation_checker')
         scheduler.add_job(check_cto_escalations, 'interval', seconds=30, id='cto_escalation_checker')
         # Run monthly partition check on the 1st of every month

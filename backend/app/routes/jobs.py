@@ -1550,7 +1550,7 @@ def accept_job(
     Accept an assigned job.
 
     IMPORTANT:
-    - The 10-minute acceptance window applies ONLY here.
+    - The 5-minute acceptance window applies ONLY here.
     - Accepting a job changes ASSIGNED -> ACCEPTED.
     - Accepting does NOT start live tracking.
     - Starting the job is a separate operation.
@@ -1612,11 +1612,11 @@ def accept_job(
 
         try:
             result = accept_broadcast_offer(
-                db,
-                job_id=job_id,
-                tenant_id=str(current_user.tenant_id),
-                technician_id=int(technician.technician_id),
-            )
+                    db,
+                    job_id=job_id,
+                    technician_tenant_id=str(technician.tenant_id),
+                    technician_id=int(technician.technician_id),
+                )
         except AssignmentConflict as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -1964,7 +1964,7 @@ def accept_job(
         # 14. Cancel acceptance timer
         #
         # The job has already been accepted.
-        # Therefore the 10-minute acceptance timer is finished.
+        # Therefore the 5-minute acceptance timer is finished.
         # -----------------------------------------------------
 
         TimerService.cancel_timer(

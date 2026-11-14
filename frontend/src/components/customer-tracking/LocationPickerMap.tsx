@@ -12,6 +12,8 @@ interface Props {
   latitude: number | null;
   longitude: number | null;
   onChange: (latitude: number, longitude: number, address?: string) => void;
+  isSelectionAllowed?: (latitude: number, longitude: number) => boolean;
+  onSelectionRejected?: () => void;
 }
 
 // Clean Emerald Vector Pin for Leaflet Fallback
@@ -102,7 +104,7 @@ function RecenterMap({ lat, lng }: { lat: number; lng: number }) {
   return null;
 }
 
-export default function LocationPickerMap({ latitude, longitude, onChange }: Props) {
+export default function LocationPickerMap({ latitude, longitude, onChange, isSelectionAllowed, onSelectionRejected }: Props) {
   const pos = useMemo(() => {
     if (latitude != null && longitude != null && !isNaN(latitude) && !isNaN(longitude)) {
       return { lat: latitude, lng: longitude };
@@ -111,6 +113,7 @@ export default function LocationPickerMap({ latitude, longitude, onChange }: Pro
   }, [latitude, longitude]);
 
   const [markerPos, setMarkerPos] = useState<{ lat: number; lng: number }>(pos);
+  const markerPosRef = useRef(pos);
   const [addressLoading, setAddressLoading] = useState(false);
   const [useFallback, setUseFallback] = useState(false);
   const [olaLoaded, setOlaLoaded] = useState(false);
@@ -122,11 +125,20 @@ export default function LocationPickerMap({ latitude, longitude, onChange }: Pro
 
   useEffect(() => {
     setMarkerPos(pos);
+    markerPosRef.current = pos;
   }, [pos]);
 
   const selectLocation = useCallback(
     async (lat: number, lng: number) => {
+      if (isSelectionAllowed && !isSelectionAllowed(lat, lng)) {
+        olaMarkerRef.current?.setLngLat([markerPosRef.current.lng, markerPosRef.current.lat]);
+        setMarkerPos(markerPosRef.current);
+        onSelectionRejected?.();
+        return;
+      }
+      markerPosRef.current = { lat, lng };
       setMarkerPos({ lat, lng });
+      olaMarkerRef.current?.setLngLat([lng, lat]);
       setAddressLoading(true);
       try {
         const response = await api.get("/organizations/reverse-location", {
@@ -142,7 +154,7 @@ export default function LocationPickerMap({ latitude, longitude, onChange }: Pro
         setAddressLoading(false);
       }
     },
-    [onChange]
+    [isSelectionAllowed, onChange, onSelectionRejected]
   );
 
   // Initialize Ola Maps Web SDK (Vector Tiles)
@@ -196,7 +208,6 @@ export default function LocationPickerMap({ latitude, longitude, onChange }: Pro
         mapInstance.on("click", (e: any) => {
           if (!e?.lngLat) return;
           const { lng, lat } = e.lngLat;
-          marker.setLngLat([lng, lat]);
           void selectLocation(lat, lng);
         });
 

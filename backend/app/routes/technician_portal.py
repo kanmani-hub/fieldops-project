@@ -153,7 +153,7 @@ async def _broadcast_automatic_job_chat_message(message, customer_user_id: str) 
 
 # Keep this aligned with the acceptance window in routes/jobs.py.
 
-ACCEPTANCE_WINDOW_SECONDS = 600
+ACCEPTANCE_WINDOW_SECONDS = 5 * 60
 
 router = APIRouter(
 
@@ -1262,23 +1262,67 @@ async def get_assigned_jobs(
 
         )
 
-    # My Jobs contains jobs the technician has accepted or started. Pending
-    # assignment/offer cards are served separately to the acceptance popup.
+    pending_deadline = datetime.now(timezone.utc) - timedelta(
+        seconds=ACCEPTANCE_WINDOW_SECONDS
+    )
     query = query.filter(
-        ~func.upper(func.trim(Job.status)).in_(
-            ["ASSIGNED", "AWAITING_ACCEPTANCE", "ACTIVE", "PENDING", "QUEUED", "PLANNED"]
+        or_(
+            ~func.upper(func.trim(Job.status)).in_(
+                ["ASSIGNED", "AWAITING_ACCEPTANCE", "ACTIVE"]
+            ),
+            and_(
+                or_(
+                    Job.assigned_by.is_(None),
+                    Job.assigned_by != "SYSTEM_FORCE_ASSIGNMENT",
+                ),
+                Job.assigned_at.is_not(None),
+                Job.assigned_at > pending_deadline,
+            ),
         )
     )
 
     jobs = query.all()
-    if not jobs:
-        return []
 
     tech = _get_tech_for_user(db, current_user.user_id, current_user.tenant_id)
     earliest_open_job = (
         _get_technician_earliest_open_job(db, tech.technician_id)
         if tech else None
     )
+    # Keep live broadcast offers in Assigned Jobs after the popup is closed.
+    # They remain actionable there and disappear when rejected or timed out.
+    offer_assigned_at_by_job_id = {}
+    include_pending_offers = not status_filter or status_filter.strip().upper() in {
+        "ASSIGNED",
+        "AWAITING_ACCEPTANCE",
+        "PENDING",
+    }
+    if tech and include_pending_offers:
+        offer_cutoff = datetime.now(timezone.utc) - timedelta(
+            seconds=ACCEPTANCE_WINDOW_SECONDS
+        )
+        pending_offer_rows = (
+            db.query(Job, JobAssignment.assigned_at)
+            .join(JobAssignment, JobAssignment.job_id == Job.id)
+            .filter(
+                JobAssignment.technician_id == tech.technician_id,
+                JobAssignment.tenant_id == str(tech.tenant_id),
+                JobAssignment.status == "PENDING",
+                JobAssignment.assigned_at.is_not(None),
+                JobAssignment.assigned_at > offer_cutoff,
+                Job.assigned_technician_id.is_(None),
+                func.upper(func.trim(Job.status)).in_(
+                    ["CREATED", "QUEUED", "UNASSIGNED", "OFFERED"]
+                ),
+            )
+            .all()
+        )
+        known_job_ids = {int(job.id) for job in jobs}
+        for offered_job, offer_assigned_at in pending_offer_rows:
+            if int(offered_job.id) not in known_job_ids:
+                jobs.append(offered_job)
+                known_job_ids.add(int(offered_job.id))
+            offer_assigned_at_by_job_id[int(offered_job.id)] = offer_assigned_at
+
     jobs.sort(key=_job_schedule_order_key)
 
     job_ids = [job.id for job in jobs]
@@ -1301,6 +1345,14 @@ async def get_assigned_jobs(
     response_jobs = [
         TechnicianJobResponse.model_validate(job).model_copy(
             update={
+                **(
+                    {
+                        "status": "ASSIGNED",
+                        "assigned_at": offer_assigned_at_by_job_id[int(job.id)],
+                    }
+                    if int(job.id) in offer_assigned_at_by_job_id
+                    else {}
+                ),
                 "images": images_by_job.get(job.id, []),
                 "can_start": bool(
                     earliest_open_job
@@ -1332,6 +1384,9 @@ async def get_technician_job_offers(
             JobAssignment.tenant_id == str(tech.tenant_id),
             JobAssignment.status == "PENDING",
             JobAssignment.assigned_at.is_not(None),
+            JobAssignment.assigned_at > datetime.now(timezone.utc) - timedelta(
+                seconds=ACCEPTANCE_WINDOW_SECONDS
+            ),
             Job.assigned_technician_id.is_(None),
             func.upper(func.trim(Job.status)).in_(
                 ["CREATED", "QUEUED", "UNASSIGNED", "OFFERED"]
@@ -1343,8 +1398,24 @@ async def get_technician_job_offers(
         db.query(Job)
         .filter(
             Job.assigned_technician_id == tech.technician_id,
-            func.upper(func.trim(Job.status)).in_(
-                ["ASSIGNED", "AWAITING_ACCEPTANCE", "ACTIVE"]
+            or_(
+                and_(
+                    Job.assigned_by == "SYSTEM_FORCE_ASSIGNMENT",
+                    func.upper(func.trim(Job.status)) == "ACCEPTED",
+                ),
+                and_(
+                    or_(
+                        Job.assigned_by.is_(None),
+                        Job.assigned_by != "SYSTEM_FORCE_ASSIGNMENT",
+                    ),
+                    Job.assigned_at.is_not(None),
+                    Job.assigned_at > datetime.now(timezone.utc) - timedelta(
+                        seconds=ACCEPTANCE_WINDOW_SECONDS
+                    ),
+                    func.upper(func.trim(Job.status)).in_(
+                        ["ASSIGNED", "AWAITING_ACCEPTANCE", "ACTIVE"]
+                    ),
+                ),
             ),
         )
         .all()
@@ -1554,6 +1625,29 @@ async def get_job_detail(
         raise HTTPException(status_code=403, detail="Technician record not found")
 
     job = _get_my_job(db, job_id, tech)
+    pending_offer_assigned_at = None
+    if not job:
+        pending_offer_row = (
+            db.query(Job, JobAssignment.assigned_at)
+            .join(JobAssignment, JobAssignment.job_id == Job.id)
+            .filter(
+                Job.id == job_id,
+                JobAssignment.technician_id == tech.technician_id,
+                JobAssignment.tenant_id == str(tech.tenant_id),
+                JobAssignment.status == "PENDING",
+                JobAssignment.assigned_at.is_not(None),
+                JobAssignment.assigned_at > datetime.now(timezone.utc) - timedelta(
+                    seconds=ACCEPTANCE_WINDOW_SECONDS
+                ),
+                Job.assigned_technician_id.is_(None),
+                func.upper(func.trim(Job.status)).in_(
+                    ["CREATED", "QUEUED", "UNASSIGNED", "OFFERED"]
+                ),
+            )
+            .first()
+        )
+        if pending_offer_row:
+            job, pending_offer_assigned_at = pending_offer_row
 
     if not job:
 
@@ -1574,6 +1668,11 @@ async def get_job_detail(
     earliest_open_job = _get_technician_earliest_open_job(db, tech.technician_id)
     return TechnicianJobResponse.model_validate(job).model_copy(
         update={
+            **(
+                {"status": "ASSIGNED", "assigned_at": pending_offer_assigned_at}
+                if pending_offer_assigned_at is not None
+                else {}
+            ),
             "images": job_images,
             "can_start": bool(
                 earliest_open_job
@@ -1779,10 +1878,11 @@ async def accept_job(
             accept_broadcast_offer(
                 db,
                 job_id=job_id,
-                tenant_id=str(current_user.tenant_id),
+                technician_tenant_id=str(tech.tenant_id),
                 technician_id=int(tech.technician_id),
             )
         except AssignmentConflict as exc:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=str(exc),
@@ -1832,6 +1932,20 @@ async def accept_job(
             "status": "ACCEPTED",
         }
 
+    if current_status in {"ASSIGNED", "AWAITING_ACCEPTANCE", "ACTIVE"} and job.assigned_at:
+        assigned_at = job.assigned_at
+        if assigned_at.tzinfo is None:
+            assigned_at = assigned_at.replace(tzinfo=timezone.utc)
+        else:
+            assigned_at = assigned_at.astimezone(timezone.utc)
+        if datetime.now(timezone.utc) >= assigned_at + timedelta(
+            seconds=ACCEPTANCE_WINDOW_SECONDS
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail="Acceptance window expired",
+            )
+
     if current_status not in {
         "ASSIGNED",
         "AWAITING_ACCEPTANCE",
@@ -1845,23 +1959,36 @@ async def accept_job(
             ),
         )
 
-    # Serialize workload changes and enforce the product limit of five
-    # accepted, unfinished jobs per technician.
+    # Lock the technician row using the tenant-scoped composite identity.
+    # The stored current_jobs column is the dispatch/acceptance workload source.
     locked_tech = (
         db.query(Technician)
-        .filter(Technician.technician_id == tech.technician_id)
+        .filter(
+            Technician.technician_id == tech.technician_id,
+            Technician.tenant_id == str(tech.tenant_id),
+        )
         .with_for_update()
         .first()
     )
-    if callable(getattr(db, "get_bind", None)):
-        from ..workload_utils import count_accepted_open_jobs
-        accepted_open_count = count_accepted_open_jobs(db, tech.technician_id)
-    else:
-        accepted_open_count = 0
-    if not locked_tech or accepted_open_count >= 5:
+    if not locked_tech:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Technician record not found",
+        )
+
+    current_workload = max(0, int(locked_tech.current_jobs or 0))
+    if current_workload >= 5:
+        # Do not leave a broadcast claim half-finished if the workload guard fails.
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Maximum workload reached (5/5)",
+            detail={
+                "code": "MAXIMUM_WORKLOAD_REACHED",
+                "message": "Maximum workload reached (5/5)",
+                "current_workload": current_workload,
+                "workload_limit": 5,
+            },
         )
 
     # Idempotency: repeated clicks / retries must not double-count workload
@@ -1892,9 +2019,10 @@ async def accept_job(
 
     # toward technician workload.
 
-    if callable(getattr(db, "get_bind", None)):
-        from ..workload_utils import reconcile_workload_count
-        reconcile_workload_count(db, tech.technician_id)
+    # current_jobs is the workload source used by dispatch. The technician
+    # row is locked above, so this increment is serialized across job accepts.
+    locked_tech.current_jobs = current_workload + 1
+    db.add(locked_tech)
 
     # ---------------------------------------------------------
 
@@ -2161,105 +2289,97 @@ async def reject_job(
     ),
     db: Session = Depends(get_db),
 ):
-    """
-    Reject a job offered to the authenticated technician.
-
-    Cross-tenant rules:
-    - A technician can reject a job assigned to them, even if the
-      job belongs to another organization.
-    - Rejection history records the technician's organization.
-    - The technician rejection notification is scoped to that
-      technician's organization.
-    - The dispatcher graph resumes after the rejection is committed.
-    """
-
-    # ---------------------------------------------------------
-    # 1. Resolve the authenticated technician
-    # ---------------------------------------------------------
+    """Reject only this technician's broadcast offer, or a legacy assignment."""
     tech = _get_tech_for_user(
         db,
         current_user.user_id,
         current_user.tenant_id,
     )
-
     if not tech:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Technician record not found",
         )
 
-    # ---------------------------------------------------------
-    # 2. Verify that this job is assigned to this technician.
-    # Do not filter by job.tenant_id: cross-tenant dispatch is valid.
-    # ---------------------------------------------------------
-    job = _get_my_job(db, job_id, tech)
-
-    if not job:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Job not found or not assigned to you",
-        )
-
-    current_status = (
-        (job.status or "")
-        .strip()
-        .upper()
-        .replace("-", "_")
-        .replace(" ", "_")
+    # Keep the same lock order as accept_broadcast_offer: Job, then offer.
+    job = (
+        db.query(Job)
+        .filter(Job.id == job_id)
+        .with_for_update()
+        .first()
     )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-    if current_status not in {
-        "ASSIGNED",
-        "AWAITING_ACCEPTANCE",
-        "ACTIVE",
-    }:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "Job can only be rejected before acceptance. "
-                f"Current status: {job.status}"
+    offer = (
+        db.query(JobAssignment)
+        .filter(
+            JobAssignment.job_id == job_id,
+            JobAssignment.tenant_id == str(tech.tenant_id),
+            JobAssignment.technician_id == int(tech.technician_id),
+            JobAssignment.status == "PENDING",
+            JobAssignment.assigned_at.is_not(None),
+            JobAssignment.assigned_at > datetime.now(timezone.utc) - timedelta(
+                seconds=ACCEPTANCE_WINDOW_SECONDS
             ),
         )
-
-    # Prevent duplicate rejection processing.
-    if (
-        (job.status or "").upper()
-        == "REJECTED_BY_TECHNICIAN"
-        and job.assigned_technician_id is None
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="This job offer has already been rejected.",
-        )
-
-    old_status = job.status
-    old_technician_id = job.assigned_technician_id
-    rejected_at = datetime.now(timezone.utc)
-    technician_recipient_id = str(
-        tech.tech_id or tech.technician_id
+        .with_for_update()
+        .first()
     )
+    broadcast_rejection = offer is not None
+    rejected_at = datetime.now(timezone.utc)
+    technician_recipient_id = str(tech.tech_id or tech.technician_id)
 
-    try:
-        # -----------------------------------------------------
-        # 3. Persist the rejection
-        # -----------------------------------------------------
-        # This is one offer's rejection. Keep the job retryable while the
-        # remaining technicians from Planning receive their offers.
+    if broadcast_rejection:
+        # A broadcast job remains globally unassigned until one offer wins.
+        if job.assigned_technician_id is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This job has already been claimed",
+            )
+        if str(job.status or "").strip().upper() in {
+            "CANCELLED", "CANCELED", "COMPLETED", "CLOSED"
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This job is no longer available",
+            )
+        old_offer_status = offer.status
+        offer.status = "REJECTED"
+        offer.responded_at = rejected_at
+        offer.is_current = False
+        old_status = job.status
+        old_technician_id = job.assigned_technician_id
+    else:
+        # Backward compatibility for older single-technician assignments.
+        job = _get_my_job(db, job_id, tech)
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No pending offer or assigned job belongs to you",
+            )
+        current_status = str(job.status or "").strip().upper().replace("-", "_").replace(" ", "_")
+        if current_status not in {"ASSIGNED", "AWAITING_ACCEPTANCE", "ACTIVE"}:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Job can only be rejected before acceptance. Current status: {job.status}",
+            )
+        old_offer_status = current_status
+        old_status = job.status
+        old_technician_id = job.assigned_technician_id
         job.status = "QUEUED"
+        job.assigned_technician_id = None
         job.rejection_reason = data.reason
         job.rejected_at = rejected_at
         job.rejected_by_tech_id = technician_recipient_id
 
-        # Count prior attempts for this job.
-        # Preserve technician_tenant_id for organization-specific
-        # rejection history.
+    try:
         attempt_number = (
             db.query(RedispatchAttempt)
             .filter(RedispatchAttempt.job_id == job.id)
             .count()
             + 1
         )
-
         db.add(
             RedispatchAttempt(
                 job_id=job.id,
@@ -2272,37 +2392,24 @@ async def reject_job(
             )
         )
 
-        # Release the previous technician so the dispatcher can
-        # offer the job to another candidate.
-        job.assigned_technician_id = None
-
-        # -----------------------------------------------------
-        # 4. Create a rejection notification in the technician's
-        # own organization, not the job owner's organization.
-        # -----------------------------------------------------
-        notification = InAppNotification(
-            id=str(uuid.uuid4()),
-            tenant_id=tech.tenant_id,
-            tech_id=technician_recipient_id,
-            recipient_role="technician",
-            recipient_id=technician_recipient_id,
-            group_key=f"job_{job.id}_JOB_REJECTED",
-            job_id=str(job.id),
-            type="JOB_REJECTED",
-            title="Job Rejection Recorded",
-            body=(
-                f"You rejected Job #{job.id}. "
-                f"Reason: {data.reason}"
-            ),
-            status="UNREAD",
-            priority="HIGH",
-            created_at=rejected_at,
+        db.add(
+            InAppNotification(
+                id=str(uuid.uuid4()),
+                tenant_id=str(tech.tenant_id),
+                tech_id=str(tech.tech_id or tech.technician_id),
+                recipient_role="technician",
+                recipient_id=technician_recipient_id,
+                group_key=f"job_{job.id}_JOB_REJECTED_{tech.technician_id}_{rejected_at.timestamp()}",
+                job_id=str(job.id),
+                type="JOB_REJECTED",
+                title="Job Rejection Recorded",
+                body=f"You rejected Job #{job.id}. Reason: {data.reason}",
+                status="UNREAD",
+                priority="HIGH",
+                created_at=rejected_at,
+            )
         )
-        db.add(notification)
 
-        # -----------------------------------------------------
-        # 5. Audit the rejection in the acting technician's org
-        # -----------------------------------------------------
         audit_log(
             db,
             action=AuditAction.JOB_REJECTED_BY_TECHNICIAN,
@@ -2312,89 +2419,66 @@ async def reject_job(
             entity_type="job",
             entity_id=str(job.id),
             old_value={
-                "status": old_status,
+                "job_status": old_status,
                 "assigned_technician_id": old_technician_id,
+                "offer_status": old_offer_status,
             },
             new_value={
-                "status": "QUEUED",
-                "offer_outcome": "REJECTED_BY_TECHNICIAN",
+                "job_status": str(job.status),
+                "offer_status": "REJECTED",
                 "rejection_reason": data.reason,
-                "technician_tenant_id": tech.tenant_id,
+                "technician_tenant_id": str(tech.tenant_id),
+                "broadcast_offer": broadcast_rejection,
             },
             request=request,
         )
-
-        # Commit rejection, attempt history, and notification together.
         db.commit()
-
     except HTTPException:
         db.rollback()
         raise
-
-    except Exception:
+    except Exception as exc:
         db.rollback()
         logger.exception(
-            "Failed to persist job rejection: job=%s technician=%s",
+            "Failed to persist technician offer rejection job=%s technician=%s",
             job_id,
             tech.technician_id,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Unable to process job rejection",
-        )
+        ) from exc
 
-    # ---------------------------------------------------------
-    # 6. Cancel the acceptance timer.
-    # A timer cleanup failure must not undo the committed rejection.
-    # ---------------------------------------------------------
+    # Cancel only this technician's broadcast-offer timer. Keep legacy timer
+    # cleanup for older single-assignee jobs.
     try:
         redis_client = get_redis_client()
-
         if redis_client:
-            TimerService.cancel_timer(
-                redis_client,
-                str(job_id),
-            )
-            redis_client.delete(
-                f"job:timer_warning:{job_id}"
-            )
-            redis_client.delete(
-                f"job:timer_warned:{job_id}"
-            )
-
+            if broadcast_rejection:
+                TimerService.cancel_timer(
+                    redis_client, str(job_id), str(tech.technician_id)
+                )
+            else:
+                TimerService.cancel_timer(redis_client, str(job_id))
+                redis_client.delete(f"job:timer_warning:{job_id}")
+                redis_client.delete(f"job:timer_warned:{job_id}")
     except Exception:
         logger.exception(
-            "Failed to cancel acceptance timer after rejection: "
-            "job=%s technician=%s",
+            "Failed to cancel rejected offer timer job=%s technician=%s",
             job_id,
             tech.technician_id,
         )
 
-    # ---------------------------------------------------------
-    # 7. Resume the dispatcher so it can try the next candidate.
-    # ---------------------------------------------------------
+    # The broadcast-aware runtime must inspect remaining PENDING offers and
+    # only advance/replan when the final offer has become terminal.
     try:
-        runtime = get_dispatcher_runtime()
-
-        await runtime.resume_dispatch(
+        await get_dispatcher_runtime().resume_dispatch(
             job_id=job_id,
             event="TECHNICIAN_REJECTED",
             technician_id=tech.technician_id,
         )
-
-        logger.info(
-            "Dispatcher resumed after rejection: job=%s technician=%s",
-            job_id,
-            tech.technician_id,
-        )
-
     except Exception:
-        # The rejection has already been committed. Do not report
-        # that the rejection failed simply because graph resumption
-        # failed. Investigate and retry graph recovery separately.
         logger.exception(
-            "Failed to resume dispatcher after rejection: "
-            "job=%s technician=%s",
+            "Dispatcher coordinator notification failed after rejection job=%s technician=%s",
             job_id,
             tech.technician_id,
         )
@@ -2402,9 +2486,10 @@ async def reject_job(
     return {
         "message": "Job rejected",
         "job_id": job_id,
-        "status": "QUEUED",
-        "offer_outcome": "REJECTED_BY_TECHNICIAN",
+        "status": str(job.status),
+        "offer_outcome": "REJECTED",
         "rejection_reason": data.reason,
+        "broadcast_offer": broadcast_rejection,
     }
 
 @router.post("/jobs/{job_id}/start")
@@ -3165,7 +3250,7 @@ async def complete_job(
     # return above, so this reconciliation runs once after request sync.
     if callable(getattr(db, "get_bind", None)):
         from ..workload_utils import reconcile_workload_count
-        reconcile_workload_count(db, tech.technician_id)
+        reconcile_workload_count(db, tech.technician_id, str(tech.tenant_id))
 
     job.completed_at = datetime.now(timezone.utc)
 
