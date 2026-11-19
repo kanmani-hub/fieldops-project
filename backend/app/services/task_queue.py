@@ -299,6 +299,74 @@ class PriorityTaskQueue:
 
         return total
 
+    def acquire_queue_lock(
+        self,
+        tenant_id: str,
+        ttl_seconds: int = 15,
+        correlation_id: Optional[str] = None,
+    ) -> tuple[bool, Optional[str]]:
+        """Acquire a tokenized distributed lock for the tenant queue."""
+        from app.redis_client import acquire_distributed_lock
+        resource = f"task_queue:{tenant_id}"
+        return acquire_distributed_lock(
+            resource=resource,
+            ttl_seconds=ttl_seconds,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+            redis_client=self.redis,
+        )
+
+    def release_queue_lock(
+        self,
+        tenant_id: str,
+        lock_token: str,
+    ) -> bool:
+        """Safely release the tenant queue lock using its unique token."""
+        from app.redis_client import release_distributed_lock
+        resource = f"task_queue:{tenant_id}"
+        return release_distributed_lock(
+            resource=resource,
+            lock_token=lock_token,
+            tenant_id=tenant_id,
+            redis_client=self.redis,
+        )
+
+    def with_queue_lock(
+        self,
+        tenant_id: str,
+        ttl_seconds: int = 15,
+        correlation_id: Optional[str] = None,
+    ):
+        """Context manager for acquiring and releasing a tenant queue lock."""
+        from app.redis_client import with_distributed_lock
+        resource = f"task_queue:{tenant_id}"
+        return with_distributed_lock(
+            resource=resource,
+            ttl_seconds=ttl_seconds,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+            redis_client=self.redis,
+        )
+
+# ---------------------------------------------------------------------------
+# Distributed Lock Re-exports (Story: Improve distributed locks)
+# ---------------------------------------------------------------------------
+
+from app.redis_client import (
+    acquire_distributed_lock,
+    release_distributed_lock,
+    extend_distributed_lock,
+    is_lock_held,
+    with_distributed_lock,
+    improve_distributed_locks,
+    get_distributed_lock_config,
+    ImproveDistributedLocks,
+    Improve_distributed_locks,
+    get_lock_strategy,
+    get_distributed_lock_status,
+    DEFAULT_DISTRIBUTED_LOCK_CONFIG,
+)
+
 # ---------------------------------------------------------------------------
 # Task Retry Rules Re-exports (Story: Configure task retry rules)
 # ---------------------------------------------------------------------------

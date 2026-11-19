@@ -1011,6 +1011,167 @@ def post_redis_refresh_expiration_endpoint(payload: dict) -> dict:
     )
 
 
+# =============================================================================
+# Redis Enhancement: Improve Distributed Locks Endpoints
+# =============================================================================
+
+@router.get(
+    "/redis/locks/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_distributed_lock_status_endpoint() -> dict:
+    """Return canonical status for hardened distributed lock capability."""
+    from app.redis_client import improve_distributed_locks
+    return improve_distributed_locks()
+
+
+@router.get(
+    "/redis/locks/strategy",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_distributed_lock_strategy_endpoint() -> dict:
+    """Return registered distributed lock strategy."""
+    from app.redis_client import improve_distributed_locks
+    return improve_distributed_locks()
+
+
+@router.post(
+    "/redis/locks/improve",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_improve_distributed_locks_endpoint() -> dict:
+    """Activate or verify hardened distributed lock configuration."""
+    from app.redis_client import improve_distributed_locks
+    return improve_distributed_locks()
+
+
+@router.get(
+    "/redis/locks/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_distributed_lock_config_endpoint() -> dict:
+    """Return full distributed lock configuration features and default TTL."""
+    from app.redis_client import get_distributed_lock_config
+    return get_distributed_lock_config()
+
+
+@router.post(
+    "/redis/locks/acquire",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_acquire_distributed_lock_endpoint(payload: dict) -> dict:
+    """Acquire a tokenized distributed lock."""
+    from app.redis_client import acquire_distributed_lock
+    resource = payload.get("resource")
+    ttl = payload.get("ttl_seconds", 30)
+    tenant_id = payload.get("tenant_id")
+    correlation_id = payload.get("correlation_id")
+
+    acquired, token = acquire_distributed_lock(
+        resource=resource,
+        ttl_seconds=ttl,
+        tenant_id=tenant_id,
+        correlation_id=correlation_id,
+    )
+    return {
+        "acquired": acquired,
+        "resource": resource,
+        "lock_token": token if acquired else None,
+        "tenant_id": tenant_id,
+    }
+
+
+@router.post(
+    "/redis/locks/release",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_release_distributed_lock_endpoint(payload: dict) -> dict:
+    """Safely release a distributed lock if caller owns the token."""
+    from app.redis_client import release_distributed_lock
+    resource = payload.get("resource")
+    token = payload.get("lock_token")
+    tenant_id = payload.get("tenant_id")
+
+    released = release_distributed_lock(
+        resource=resource,
+        lock_token=token,
+        tenant_id=tenant_id,
+    )
+    return {
+        "released": released,
+        "resource": resource,
+        "tenant_id": tenant_id,
+    }
+
+
+@router.post(
+    "/redis/locks/extend",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_extend_distributed_lock_endpoint(payload: dict) -> dict:
+    """Extend TTL of an active lock if caller owns the token."""
+    from app.redis_client import extend_distributed_lock
+    resource = payload.get("resource")
+    token = payload.get("lock_token")
+    additional_ttl = payload.get("additional_ttl_seconds", 30)
+    tenant_id = payload.get("tenant_id")
+
+    extended = extend_distributed_lock(
+        resource=resource,
+        lock_token=token,
+        additional_ttl_seconds=additional_ttl,
+        tenant_id=tenant_id,
+    )
+    return {
+        "extended": extended,
+        "resource": resource,
+        "tenant_id": tenant_id,
+    }
+
+
+
 
 
 

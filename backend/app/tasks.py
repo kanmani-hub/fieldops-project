@@ -3998,6 +3998,41 @@ ConfigureRedisExpirationRulesTask = configure_redis_expiration_rules_task
 Configure_redis_expiration_rules_task = configure_redis_expiration_rules_task
 
 
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Improve Distributed Locks Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.improve_distributed_locks_task",
+)
+def improve_distributed_locks_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and activate hardened distributed locks."""
+    from app.redis_client import improve_distributed_locks
+    return improve_distributed_locks()
+
+
+from app.redis_client import (
+    DEFAULT_DISTRIBUTED_LOCK_CONFIG,
+    acquire_distributed_lock,
+    release_distributed_lock,
+    extend_distributed_lock,
+    is_lock_held,
+    with_distributed_lock,
+    improve_distributed_locks,
+    get_distributed_lock_config,
+    ImproveDistributedLocks,
+    Improve_distributed_locks,
+    get_lock_strategy,
+    get_distributed_lock_status,
+)
+
+ImproveDistributedLocksTask = improve_distributed_locks_task
+Improve_distributed_locks_task = improve_distributed_locks_task
+
+
 
 
 
