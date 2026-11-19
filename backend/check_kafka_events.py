@@ -351,6 +351,10 @@ def read_topic_history(topic_name, limit=5, show_raw=False):
         return
 
     if not lines:
+        if topic_name == "fieldops.billing.events":
+            print(f"ℹ️  No messages in '{topic_name}'. Checking domain topic 'fieldops.events' for invoices...")
+            return read_topic_history("fieldops.events", limit=limit, show_raw=show_raw)
+
         print(f"\nℹ️  No messages found in topic '{topic_name}' yet.")
         print("   (Events will appear as actions occur in the application).\n")
         print("💡 COMMAND SUGGESTIONS:")
