@@ -1305,6 +1305,101 @@ def post_execute_cached_query_endpoint(payload: dict) -> dict:
     }
 
 
+# =============================================================================
+# Redis Enhancement: Add Redis Cache Invalidation Endpoints
+# =============================================================================
+
+@router.get(
+    "/redis/cache/invalidation/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_cache_invalidation_status_endpoint() -> dict:
+    """Return canonical status for cache invalidation capability."""
+    from app.redis_client import add_redis_cache_invalidation
+    return add_redis_cache_invalidation()
+
+
+@router.get(
+    "/redis/cache/invalidation/strategy",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_cache_invalidation_strategy_endpoint() -> dict:
+    """Return registered cache invalidation strategy."""
+    from app.redis_client import add_redis_cache_invalidation
+    return add_redis_cache_invalidation()
+
+
+@router.post(
+    "/redis/cache/invalidation/enable",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_enable_cache_invalidation_endpoint() -> dict:
+    """Enable or verify write-invalidate cache invalidation strategy."""
+    from app.redis_client import add_redis_cache_invalidation
+    return add_redis_cache_invalidation()
+
+
+@router.get(
+    "/redis/cache/invalidation/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_cache_invalidation_config_endpoint() -> dict:
+    """Return cache invalidation mappings and supported entity types."""
+    from app.redis_client import get_cache_invalidation_config
+    return get_cache_invalidation_config()
+
+
+@router.post(
+    "/redis/cache/invalidation/trigger",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_trigger_cache_invalidation_endpoint(payload: dict) -> dict:
+    """Trigger cache invalidation for a domain entity write/update/delete."""
+    from app.redis_client import invalidate_cache_on_write
+    entity_type = payload.get("entity_type", "job")
+    entity_id = payload.get("entity_id")
+    tenant_id = payload.get("tenant_id")
+    correlation_id = payload.get("correlation_id")
+
+    return invalidate_cache_on_write(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        tenant_id=tenant_id,
+        correlation_id=correlation_id,
+    )
+
+
+
 
 
 

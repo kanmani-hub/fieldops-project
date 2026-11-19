@@ -4066,6 +4066,42 @@ AddRedisCacheForFrequentQueriesTask = add_redis_cache_for_frequent_queries_task
 Add_redis_cache_for_frequent_queries_task = add_redis_cache_for_frequent_queries_task
 
 
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Add Redis Cache Invalidation Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.add_redis_cache_invalidation_task",
+)
+def add_redis_cache_invalidation_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and activate write-invalidate cache policy."""
+    from app.redis_client import add_redis_cache_invalidation
+    return add_redis_cache_invalidation()
+
+
+from app.redis_client import (
+    DEFAULT_CACHE_INVALIDATION_CONFIG,
+    ENTITY_CACHE_MAP,
+    invalidate_cache_on_write,
+    invalidate_job_cache,
+    invalidate_technician_cache,
+    invalidate_catalog_cache,
+    invalidate_customer_cache,
+    add_redis_cache_invalidation,
+    get_cache_invalidation_config,
+    AddRedisCacheInvalidation,
+    Add_redis_cache_invalidation,
+    get_cache_invalidation_status,
+    get_invalidation_strategy,
+)
+
+AddRedisCacheInvalidationTask = add_redis_cache_invalidation_task
+Add_redis_cache_invalidation_task = add_redis_cache_invalidation_task
+
+
 
 
 

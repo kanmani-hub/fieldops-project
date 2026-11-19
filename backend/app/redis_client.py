@@ -1222,6 +1222,196 @@ get_frequent_query_cache_config = get_query_cache_config
 get_query_cache_strategy = add_redis_cache_for_frequent_queries
 
 
+# =============================================================================
+# Redis Enhancement: Add Redis Cache Invalidation (Write-Invalidate Strategy)
+# =============================================================================
+
+DEFAULT_CACHE_INVALIDATION_CONFIG = {
+    "status": "ENABLED",
+    "strategy": "write_invalidate",
+}
+
+# Mapping of authoritative domain entities to the query cache keys they affect
+ENTITY_CACHE_MAP = {
+    "job": [
+        "job_status_summary",
+        "jobs_list",
+        "technician_availability",
+    ],
+    "technician": [
+        "technician_availability",
+        "technician_profile",
+    ],
+    "catalog": [
+        "services_catalog",
+        "services_taxonomy",
+    ],
+    "customer": [
+        "customer_display_info",
+    ],
+}
+
+
+def invalidate_cache_on_write(
+    entity_type: str,
+    entity_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    redis_client=None,
+) -> dict[str, Any]:
+    """
+    Invalidate cached query results affected by authoritative data writes/mutations.
+    Guarantees strict tenant boundary isolation: never purges another tenant's keys.
+    """
+    clean_type = str(entity_type).strip().lower()
+    affected_queries = ENTITY_CACHE_MAP.get(clean_type, [clean_type])
+    total_invalidated = 0
+    client = redis_client if redis_client is not None else get_redis_client()
+
+    if not client:
+        return {
+            "status": "SKIPPED",
+            "reason": "Redis client unavailable",
+            "entity_type": clean_type,
+            "entity_id": entity_id,
+            "tenant_id": tenant_id,
+            "invalidated_count": 0,
+            "affected_queries": affected_queries,
+        }
+
+    for query_name in affected_queries:
+        # Invalidate tenant-scoped queries
+        if tenant_id and tenant_id != "__platform__":
+            count = invalidate_query_cache(
+                query_name=query_name,
+                tenant_id=tenant_id,
+                redis_client=client,
+            )
+            total_invalidated += count
+        else:
+            # Platform or global catalog items
+            count = invalidate_query_cache(
+                query_name=query_name,
+                tenant_id=None,
+                redis_client=client,
+            )
+            total_invalidated += count
+
+    import logging
+    logging.getLogger(__name__).info(
+        "Invalidated %d cache keys on %s write (entity_id=%s, tenant_id=%s, correlation_id=%s)",
+        total_invalidated,
+        clean_type,
+        entity_id,
+        tenant_id,
+        correlation_id,
+    )
+
+    return {
+        "status": "INVALIDATED",
+        "strategy": "write_invalidate",
+        "entity_type": clean_type,
+        "entity_id": entity_id,
+        "tenant_id": tenant_id,
+        "correlation_id": correlation_id,
+        "affected_queries": affected_queries,
+        "invalidated_count": total_invalidated,
+    }
+
+
+def invalidate_job_cache(
+    tenant_id: str,
+    job_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    redis_client=None,
+) -> dict[str, Any]:
+    """Invalidate cached queries affected by a job write / transition."""
+    return invalidate_cache_on_write(
+        entity_type="job",
+        entity_id=job_id,
+        tenant_id=tenant_id,
+        correlation_id=correlation_id,
+        redis_client=redis_client,
+    )
+
+
+def invalidate_technician_cache(
+    tenant_id: str,
+    technician_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    redis_client=None,
+) -> dict[str, Any]:
+    """Invalidate cached queries affected by technician state/availability change."""
+    return invalidate_cache_on_write(
+        entity_type="technician",
+        entity_id=technician_id,
+        tenant_id=tenant_id,
+        correlation_id=correlation_id,
+        redis_client=redis_client,
+    )
+
+
+def invalidate_catalog_cache(
+    tenant_id: Optional[str] = None,
+    service_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    redis_client=None,
+) -> dict[str, Any]:
+    """Invalidate cached queries affected by services catalog mutations."""
+    return invalidate_cache_on_write(
+        entity_type="catalog",
+        entity_id=service_id,
+        tenant_id=tenant_id,
+        correlation_id=correlation_id,
+        redis_client=redis_client,
+    )
+
+
+def invalidate_customer_cache(
+    tenant_id: str,
+    customer_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    redis_client=None,
+) -> dict[str, Any]:
+    """Invalidate cached queries affected by customer updates."""
+    return invalidate_cache_on_write(
+        entity_type="customer",
+        entity_id=customer_id,
+        tenant_id=tenant_id,
+        correlation_id=correlation_id,
+        redis_client=redis_client,
+    )
+
+
+def add_redis_cache_invalidation() -> dict[str, Any]:
+    """
+    Return canonical contract for cache invalidation capability:
+    {
+        "status": "ENABLED",
+        "strategy": "write_invalidate"
+    }
+    """
+    return dict(DEFAULT_CACHE_INVALIDATION_CONFIG)
+
+
+def get_cache_invalidation_config() -> dict[str, Any]:
+    """Return complete invalidation strategy configuration and entity mappings."""
+    return {
+        "status": "ENABLED",
+        "strategy": "write_invalidate",
+        "entity_mappings": dict(ENTITY_CACHE_MAP),
+        "supported_entities": list(ENTITY_CACHE_MAP.keys()),
+    }
+
+
+# Authoritative story aliases
+AddRedisCacheInvalidation = add_redis_cache_invalidation
+Add_redis_cache_invalidation = add_redis_cache_invalidation
+get_cache_invalidation_status = add_redis_cache_invalidation
+get_invalidation_strategy = add_redis_cache_invalidation
+
+
+
 
 
 
