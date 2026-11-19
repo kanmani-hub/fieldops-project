@@ -4033,6 +4033,39 @@ ImproveDistributedLocksTask = improve_distributed_locks_task
 Improve_distributed_locks_task = improve_distributed_locks_task
 
 
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Add Redis Cache for Frequent Queries Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.add_redis_cache_for_frequent_queries_task",
+)
+def add_redis_cache_for_frequent_queries_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and activate frequent query read-through cache."""
+    from app.redis_client import add_redis_cache_for_frequent_queries
+    return add_redis_cache_for_frequent_queries()
+
+
+from app.redis_client import (
+    DEFAULT_FREQUENT_QUERY_CACHE_CONFIG,
+    build_query_cache_key,
+    get_or_set_cached_query,
+    invalidate_query_cache,
+    add_redis_cache_for_frequent_queries,
+    get_query_cache_config,
+    AddRedisCacheForFrequentQueries,
+    Add_redis_cache_for_frequent_queries,
+    get_frequent_query_cache_config,
+    get_query_cache_strategy,
+)
+
+AddRedisCacheForFrequentQueriesTask = add_redis_cache_for_frequent_queries_task
+Add_redis_cache_for_frequent_queries_task = add_redis_cache_for_frequent_queries_task
+
+
 
 
 

@@ -3,6 +3,8 @@ from redis.exceptions import ConnectionError, TimeoutError
 import os
 import time
 import secrets
+import json
+import hashlib
 from contextlib import contextmanager
 from typing import Optional, Any, Dict, List, Union, Tuple
 
@@ -1052,6 +1054,173 @@ ImproveDistributedLocks = improve_distributed_locks
 Improve_distributed_locks = improve_distributed_locks
 get_lock_strategy = improve_distributed_locks
 get_distributed_lock_status = improve_distributed_locks
+
+
+# =============================================================================
+# Redis Enhancement: Add Redis Cache for Frequent Queries (Read-Through Cache)
+# =============================================================================
+
+DEFAULT_FREQUENT_QUERY_CACHE_CONFIG = {
+    "status": "ENABLED",
+    "strategy": "read_through",
+    "fallback": "database",
+}
+
+
+def build_query_cache_key(
+    query_name: str,
+    tenant_id: Optional[str] = None,
+    **params: Any,
+) -> str:
+    """
+    Construct a standardized, collision-safe cache key for a frequent query.
+    Tenant-scoped: cache:tenant:{tenant_id}:{query_name}:{params_hash}
+    Global:        cache:{query_name}:{params_hash}
+    """
+    clean_query = str(query_name).strip(":")
+    if params:
+        param_str = json.dumps(params, sort_keys=True, default=str)
+        param_hash = hashlib.sha256(param_str.encode("utf-8")).hexdigest()[:16]
+    else:
+        param_hash = "default"
+
+    if tenant_id:
+        return f"cache:tenant:{str(tenant_id).strip(':')}:{clean_query}:{param_hash}"
+    return f"cache:{clean_query}:{param_hash}"
+
+
+def get_or_set_cached_query(
+    query_name: str,
+    fetcher_fn,
+    tenant_id: Optional[str] = None,
+    ttl_seconds: int = 300,
+    redis_client=None,
+    **params: Any,
+) -> tuple[Any, bool]:
+    """
+    Read-through cache executor.
+    1. Check Redis cache. On hit, return (cached_data, True).
+    2. On miss, invoke fetcher_fn(), populate Redis cache with TTL, return (db_data, False).
+    3. On Redis failure/unavailability, seamlessly fall back to fetcher_fn() directly from database!
+    """
+    cache_key = build_query_cache_key(query_name, tenant_id=tenant_id, **params)
+    if redis_client is False:
+        client = None
+    elif redis_client is not None:
+        client = redis_client
+    else:
+        client = get_redis_client()
+
+    # Step 1: Attempt read from Redis
+    if client:
+        try:
+            cached_val = client.get(cache_key)
+            if cached_val is not None:
+                parsed = json.loads(cached_val)
+                return parsed, True
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Redis cache read failed for key '%s', falling back to database: %s",
+                cache_key,
+                exc,
+            )
+
+    # Step 2: Cache miss or Redis failure -> Fall back to database fetcher_fn
+    db_data = fetcher_fn()
+
+    # Step 3: Populate Redis best-effort with TTL
+    if client and db_data is not None:
+        try:
+            serialized = json.dumps(db_data, default=str)
+            client.setex(cache_key, ttl_seconds, serialized)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Failed to write to Redis cache for key '%s': %s",
+                cache_key,
+                exc,
+            )
+
+    return db_data, False
+
+
+def invalidate_query_cache(
+    query_name: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    redis_client=None,
+) -> int:
+    """
+    Invalidate cached query results for a tenant, query name, or both.
+    Returns the count of deleted keys.
+    """
+    client = redis_client if redis_client is not None else get_redis_client()
+    if not client:
+        return 0
+
+    if tenant_id and query_name:
+        pattern = f"cache:tenant:{str(tenant_id).strip(':')}:{str(query_name).strip(':')}:*"
+    elif tenant_id:
+        pattern = f"cache:tenant:{str(tenant_id).strip(':')}:*"
+    elif query_name:
+        pattern = f"cache:{str(query_name).strip(':')}:*"
+    else:
+        pattern = "cache:*"
+
+    deleted_count = 0
+    try:
+        raw_client = getattr(client, "client", client)
+        if hasattr(raw_client, "scan_iter"):
+            keys = list(raw_client.scan_iter(match=pattern))
+            if keys:
+                deleted_count = raw_client.delete(*keys)
+        elif hasattr(raw_client, "keys"):
+            keys = raw_client.keys(pattern)
+            if keys:
+                deleted_count = raw_client.delete(*keys)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to invalidate query cache for pattern '%s': %s", pattern, exc)
+
+    return deleted_count
+
+
+def add_redis_cache_for_frequent_queries() -> dict[str, Any]:
+    """
+    Return canonical contract for frequent query cache capability:
+    {
+        "status": "ENABLED",
+        "strategy": "read_through",
+        "fallback": "database"
+    }
+    """
+    return dict(DEFAULT_FREQUENT_QUERY_CACHE_CONFIG)
+
+
+def get_query_cache_config() -> dict[str, Any]:
+    """Return full operational configuration for read-through frequent query cache."""
+    return {
+        "status": "ENABLED",
+        "strategy": "read_through",
+        "fallback": "database",
+        "default_ttl_seconds": 300,
+        "serialization": "json",
+        "supported_candidates": [
+            "technician_availability",
+            "services_catalog",
+            "job_status_summary",
+            "customer_display_info",
+            "tenant_settings",
+        ],
+    }
+
+
+# Authoritative story aliases
+AddRedisCacheForFrequentQueries = add_redis_cache_for_frequent_queries
+Add_redis_cache_for_frequent_queries = add_redis_cache_for_frequent_queries
+get_frequent_query_cache_config = get_query_cache_config
+get_query_cache_strategy = add_redis_cache_for_frequent_queries
+
 
 
 

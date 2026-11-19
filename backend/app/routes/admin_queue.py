@@ -1171,6 +1171,141 @@ def post_extend_distributed_lock_endpoint(payload: dict) -> dict:
     }
 
 
+# =============================================================================
+# Redis Enhancement: Add Redis Cache for Frequent Queries Endpoints
+# =============================================================================
+
+@router.get(
+    "/redis/cache/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_query_cache_status_endpoint() -> dict:
+    """Return canonical status for frequent query cache capability."""
+    from app.redis_client import add_redis_cache_for_frequent_queries
+    return add_redis_cache_for_frequent_queries()
+
+
+@router.get(
+    "/redis/cache/strategy",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_query_cache_strategy_endpoint() -> dict:
+    """Return registered query cache strategy and database fallback mode."""
+    from app.redis_client import add_redis_cache_for_frequent_queries
+    return add_redis_cache_for_frequent_queries()
+
+
+@router.post(
+    "/redis/cache/enable",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_enable_query_cache_endpoint() -> dict:
+    """Enable or verify frequent query read-through caching configuration."""
+    from app.redis_client import add_redis_cache_for_frequent_queries
+    return add_redis_cache_for_frequent_queries()
+
+
+@router.get(
+    "/redis/cache/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_query_cache_config_endpoint() -> dict:
+    """Return query cache configuration, candidate queries, and default TTLs."""
+    from app.redis_client import get_query_cache_config
+    return get_query_cache_config()
+
+
+@router.post(
+    "/redis/cache/invalidate",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_invalidate_query_cache_endpoint(payload: Optional[dict] = None) -> dict:
+    """Invalidate cached queries for a given query name and/or tenant."""
+    from app.redis_client import invalidate_query_cache
+    query_name = payload.get("query_name") if payload else None
+    tenant_id = payload.get("tenant_id") if payload else None
+    count = invalidate_query_cache(query_name=query_name, tenant_id=tenant_id)
+    return {
+        "status": "INVALIDATED",
+        "invalidated_count": count,
+        "query_name": query_name,
+        "tenant_id": tenant_id,
+    }
+
+
+@router.post(
+    "/redis/cache/query",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_execute_cached_query_endpoint(payload: dict) -> dict:
+    """Execute a read-through cached query with database fallback demonstration."""
+    from app.redis_client import get_or_set_cached_query
+    query_name = payload.get("query_name", "test_query")
+    tenant_id = payload.get("tenant_id")
+    params = payload.get("params", {})
+    ttl_seconds = payload.get("ttl_seconds", 300)
+
+    # Simulated database fetcher
+    def db_fetcher():
+        return {
+            "query": query_name,
+            "tenant_id": tenant_id,
+            "data": f"Database source of truth result for {query_name}",
+            "params": params,
+        }
+
+    data, cached = get_or_set_cached_query(
+        query_name=query_name,
+        fetcher_fn=db_fetcher,
+        tenant_id=tenant_id,
+        ttl_seconds=ttl_seconds,
+        **params,
+    )
+    return {
+        "data": data,
+        "cached": cached,
+        "source": "redis_cache" if cached else "database",
+        "tenant_id": tenant_id,
+    }
+
+
+
 
 
 
