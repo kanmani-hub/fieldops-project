@@ -332,6 +332,22 @@ services:
           --operation WRITE \
           --operation DESCRIBE \
           --topic "fieldops.notification.events"
+        # Allow the producer to publish billing events.
+        /opt/kafka/bin/kafka-acls.sh \
+          --bootstrap-server kafka:9092 \
+          --add \
+          --allow-principal "User:$$KAFKA_PRODUCER_USERNAME" \
+          --operation WRITE \
+          --operation DESCRIBE \
+          --topic "fieldops.billing.events"
+        # Allow the producer to publish payment events.
+        /opt/kafka/bin/kafka-acls.sh \
+          --bootstrap-server kafka:9092 \
+          --add \
+          --allow-principal "User:$$KAFKA_PRODUCER_USERNAME" \
+          --operation WRITE \
+          --operation DESCRIBE \
+          --topic "fieldops.payment.events"
         # Allow notification consumer to read lifecycle events.
         /opt/kafka/bin/kafka-acls.sh \
           --bootstrap-server kafka:9092 \

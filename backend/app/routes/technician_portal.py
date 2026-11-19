@@ -3483,7 +3483,7 @@ async def complete_job(
 
             # 2. Publish invoice event to Kafka
             from app.services.invoice_event_producer import InvoiceEventProducer
-            invoice_producer = InvoiceEventProducer(kafka_producer, topic="fieldops.events")
+            invoice_producer = InvoiceEventProducer(kafka_producer, topic="fieldops.billing.events")
             await invoice_producer.publish(
                 event_type="INVOICE_GENERATED",
                 event_id=f"evt_invoice_{closure_record.id}_{job.id}",
