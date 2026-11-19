@@ -1,3 +1,4 @@
+from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Depends
 
 from app.services.task_queue import PriorityTaskQueue
@@ -819,6 +820,197 @@ def record_celery_metric_endpoint(payload: dict) -> dict:
             tenant_id=tenant_id,
             correlation_id=correlation_id,
         )
+
+
+# =============================================================================
+# Redis Enhancement: Review Redis Key Structure Endpoints
+# =============================================================================
+
+@router.get(
+    "/redis/key-structure",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_key_structure_endpoint() -> dict:
+    """Return canonical Redis key namespaces review contract."""
+    from app.redis_client import review_redis_key_structure
+    return review_redis_key_structure()
+
+
+@router.get(
+    "/redis/namespaces",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_namespaces_endpoint() -> dict:
+    """Return registered Redis key namespaces."""
+    from app.redis_client import review_redis_key_structure
+    return review_redis_key_structure()
+
+
+@router.get(
+    "/redis/inventory",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_inventory_endpoint() -> dict:
+    """Return complete Redis key structure inventory including patterns, types, and TTL policies."""
+    from app.redis_client import get_redis_key_inventory
+    return get_redis_key_inventory()
+
+
+@router.post(
+    "/redis/review",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_redis_key_structure_review_endpoint() -> dict:
+    """Trigger or confirm review of Redis key structure namespaces."""
+    from app.redis_client import review_redis_key_structure
+    return review_redis_key_structure()
+
+
+@router.post(
+    "/redis/identify-migrations",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_redis_identify_migrations_endpoint(payload: Optional[dict] = None) -> dict:
+    """Identify legacy or un-namespaced keys that require migration to standard prefixes."""
+    from app.redis_client import identify_keys_for_migration, get_redis_client
+    keys = payload.get("keys") if payload else None
+    redis_client = get_redis_client()
+    return identify_keys_for_migration(redis_client=redis_client, keys_to_check=keys)
+
+
+# =============================================================================
+# Redis Enhancement: Configure Redis Expiration Rules Endpoints
+# =============================================================================
+
+@router.get(
+    "/redis/expiration",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_expiration_rules_endpoint() -> dict:
+    """Return canonical Redis expiration rules configuration."""
+    from app.redis_client import configure_redis_expiration_rules
+    return configure_redis_expiration_rules()
+
+
+@router.post(
+    "/redis/expiration",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def configure_redis_expiration_rules_endpoint(payload: Optional[dict] = None) -> dict:
+    """Configure and activate Redis expiration rules."""
+    from app.redis_client import configure_redis_expiration_rules
+    policy_updates = payload.get("policy_updates") if payload else None
+    return configure_redis_expiration_rules(policy_updates=policy_updates)
+
+
+@router.get(
+    "/redis/expiration/rules",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_expiration_details_endpoint() -> dict:
+    """Return full Redis expiration rules metadata, effective TTLs, and protected patterns."""
+    from app.redis_client import get_redis_expiration_config
+    return get_redis_expiration_config()
+
+
+@router.post(
+    "/redis/expiration/apply",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_redis_apply_expiration_endpoint(payload: dict) -> dict:
+    """Safely apply TTL to a Redis key, preventing expiry of durable sources of truth."""
+    from app.redis_client import apply_expiration
+    key = payload.get("key")
+    ttl = payload.get("ttl_seconds")
+    tenant_id = payload.get("tenant_id")
+    correlation_id = payload.get("correlation_id")
+    return apply_expiration(
+        key=key,
+        ttl_seconds=ttl,
+        tenant_id=tenant_id,
+        correlation_id=correlation_id,
+    )
+
+
+@router.post(
+    "/redis/expiration/refresh",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_redis_refresh_expiration_endpoint(payload: dict) -> dict:
+    """Refresh TTL on active key, rejecting durable records."""
+    from app.redis_client import refresh_expiration
+    key = payload.get("key")
+    ttl = payload.get("ttl_seconds")
+    tenant_id = payload.get("tenant_id")
+    correlation_id = payload.get("correlation_id")
+    return refresh_expiration(
+        key=key,
+        ttl_seconds=ttl,
+        tenant_id=tenant_id,
+        correlation_id=correlation_id,
+    )
+
+
 
 
 

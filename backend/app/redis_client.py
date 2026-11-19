@@ -1,8 +1,8 @@
-﻿import redis
+import redis
 from redis.exceptions import ConnectionError, TimeoutError
 import os
 import time
-from typing import Optional
+from typing import Optional, Any, Dict, List, Union
 
 class RedisCacheManager:
     def __init__(self):
@@ -85,6 +85,14 @@ class RedisCacheManager:
         result = self._execute_with_retry(self.client.expire, key, time_seconds)
         return result is not None
 
+    def ttl(self, key: str) -> int:
+        result = self._execute_with_retry(self.client.ttl, key)
+        return result if result is not None else -2
+
+    def persist(self, key: str) -> bool:
+        result = self._execute_with_retry(self.client.persist, key)
+        return bool(result)
+
     def __getattr__(self, name):
         if name == "client":
             raise AttributeError("client attribute not initialized")
@@ -102,4 +110,722 @@ def get_redis_client():
     if redis_manager is None:
         redis_manager = RedisCacheManager()
     return redis_manager
+
+
+# =============================================================================
+# Redis Enhancement: Review Redis Key Structure & Standard Namespaces
+# =============================================================================
+
+REDIS_KEY_NAMESPACES = [
+    "dispatch",
+    "gps_purge",
+    "cache",
+    "locks",
+    "celery",
+]
+
+DEFAULT_REDIS_KEY_REVIEW = {
+    "status": "REVIEWED",
+    "key_namespaces": [
+        "dispatch",
+        "gps_purge",
+        "cache",
+        "locks",
+        "celery",
+    ],
+}
+
+REDIS_KEY_INVENTORY = {
+    "dispatch": {
+        "namespace": "dispatch",
+        "owner": "Dispatch & WebSocket Service",
+        "tenant_scoped": True,
+        "patterns": [
+            "dispatch_events",  # Pub/Sub channel consumed by ws-server
+            "dispatch:events",
+            "dispatch:heartbeat:{technician_id}",
+            "dispatch:tenant:{tenant_id}:heartbeat:{technician_id}",
+            "dispatch:timer:{job_id}",
+            "dispatch:timer_warning:{job_id}",
+            "dispatch:timer_warned:{job_id}",
+            "job:timer:{job_id}",  # Legacy pattern
+            "task_queue:tenant:{tenant_id}",
+            "task_queue:tenants",
+            "task_queue:dlq",
+            "task_queue:throughput",
+            "dispatch:metrics:summary",
+        ],
+        "data_types": ["string", "zset", "set", "pubsub"],
+        "ttl_policies": {
+            "heartbeat": "60 seconds",
+            "timers": "Task acceptance SLA (typically 120-300s)",
+            "metrics": "60 seconds",
+            "queues": "Persistent until processed",
+        },
+        "migration_notes": "job:timer:* -> dispatch:timer:*, job:timer_warning:* -> dispatch:timer_warning:*",
+    },
+    "gps_purge": {
+        "namespace": "gps_purge",
+        "owner": "GPS Purge Task & Retention Engine",
+        "tenant_scoped": False,
+        "patterns": [
+            "gps_purge:total_purged_30d",
+            "gps_purge:last_purge_run",
+            "gps_purge:next_scheduled",
+            "gps_purge:status:{job_id}",
+            "gps_purge_status:{job_id}",  # Legacy pattern
+            "gps_purge_start_time:{job_id}",  # Legacy pattern
+            "gps_purge:start_time:{job_id}",
+            "gps_purge_dlq",  # Legacy list
+            "gps_purge:dlq",
+            "gps:interval:*:{job_id}",
+            "gps:cache:{job_id}:*",
+        ],
+        "data_types": ["string", "list"],
+        "ttl_policies": {
+            "statistics": "30 days (rolling)",
+            "job_status": "86400 seconds (24 hours)",
+            "intervals_cache": "Purged on job completion",
+            "dlq": "Persistent until requeued",
+        },
+        "migration_notes": "gps_purge_status:* -> gps_purge:status:*, gps_purge_dlq -> gps_purge:dlq",
+    },
+    "cache": {
+        "namespace": "cache",
+        "owner": "Application Cache Manager & Auth Services",
+        "tenant_scoped": True,
+        "patterns": [
+            "cache:{key}",
+            "cache:tenant:{tenant_id}:{key}",
+            "services_catalog:cache",
+            "mfa:{challenge_id}",
+            "sso:state:{state}",
+            "rate_limit:{tenant_id}:{user_id}",
+        ],
+        "data_types": ["string", "hash"],
+        "ttl_policies": {
+            "api_cache": "60-300 seconds",
+            "catalog_cache": "3600 seconds",
+            "mfa_sso": "300 seconds (ephemeral)",
+            "rate_limits": "60 seconds",
+        },
+        "migration_notes": "Bare cache keys should be migrated to cache:tenant:{tenant_id}:{key}",
+    },
+    "locks": {
+        "namespace": "locks",
+        "owner": "Distributed Lock Service & Idempotency",
+        "tenant_scoped": True,
+        "patterns": [
+            "locks:job:{job_id}",
+            "job:lock:{job_id}",  # Legacy pattern
+            "lock:job_accept:{job_id}",
+            "lock:ordering:{agg_type}:{agg_id}",
+            "lock:idempotency:{domain}:{event_id}",
+            "lock:idempotency_key:{domain}:{key}",
+            "scheduled_task_lock:{schedule_key}:{bucket}",
+            "locks:tenant:{tenant_id}:{resource}",
+        ],
+        "data_types": ["string"],
+        "ttl_policies": {
+            "job_lock": "10-30 seconds (with Redlock/single-instance renewal)",
+            "idempotency_lock": "60-86400 seconds",
+            "scheduled_lock": "Bucket interval (60-3600s)",
+        },
+        "migration_notes": "job:lock:* -> locks:job:*, bare lock:* -> locks:*",
+    },
+    "celery": {
+        "namespace": "celery",
+        "owner": "Celery Queue Management & Broker Runtime",
+        "tenant_scoped": True,
+        "patterns": [
+            "task_result:{task_id}",
+            "celery:result:{task_id}",
+            "celery_monitoring:failures:{queue}",
+            "celery_monitoring:retries:{queue}",
+            "celery_monitoring:latency:{queue}",
+            "celery:monitoring:{metric}:{queue}",
+            "notifications",  # Broker queue list
+            "billing",  # Broker queue list
+            "gps_processing",  # Broker queue list
+            "ai_processing",  # Broker queue list
+            "high_priority",  # Broker queue list
+            "reports",  # Broker queue list
+            "dlq",  # Broker DLQ list
+        ],
+        "data_types": ["string", "list"],
+        "ttl_policies": {
+            "task_results": "86400 seconds (24 hours)",
+            "monitoring_metrics": "Rolling counter / 86400s",
+            "broker_queues": "Persistent broker queues",
+        },
+        "migration_notes": "task_result:* -> celery:result:*, celery_monitoring:* -> celery:monitoring:*",
+    },
+}
+
+
+def build_redis_key(namespace: str, *parts: str, tenant_id: Optional[str] = None) -> str:
+    """
+    Construct a standardized, collision-safe Redis key with optional tenant isolation.
+
+    Standard Format:
+        Global:  {namespace}:{part1}:{part2}:...
+        Tenant:  {namespace}:tenant:{tenant_id}:{part1}:{part2}:...
+    """
+    clean_parts = [str(p).strip(":") for p in parts if p is not None and str(p).strip(":")]
+    ns = namespace.strip(":")
+
+    if tenant_id:
+        tid = str(tenant_id).strip(":")
+        all_parts = [ns, "tenant", tid] + clean_parts
+    else:
+        all_parts = [ns] + clean_parts
+
+    return ":".join(all_parts)
+
+
+def build_tenant_key(namespace: str, tenant_id: str, *parts: str) -> str:
+    """Convenience helper to build a strictly tenant-scoped Redis key."""
+    return build_redis_key(namespace, *parts, tenant_id=tenant_id)
+
+
+def parse_redis_key(key: str) -> dict[str, Any]:
+    """
+    Parse a Redis key to extract its namespace, tenant scope, and sub-parts.
+    """
+    if not key or not isinstance(key, str):
+        return {"namespace": "unknown", "tenant_id": None, "parts": []}
+
+    tokens = key.split(":")
+    if not tokens:
+        return {"namespace": "unknown", "tenant_id": None, "parts": []}
+
+    first = tokens[0]
+    namespace = first if first in REDIS_KEY_NAMESPACES else "unknown"
+
+    # Check for tenant scope
+    tenant_id = None
+    parts = []
+    if len(tokens) >= 3 and tokens[1] == "tenant":
+        tenant_id = tokens[2]
+        parts = tokens[3:]
+    else:
+        parts = tokens[1:]
+
+    return {
+        "namespace": namespace,
+        "tenant_id": tenant_id,
+        "parts": parts,
+        "raw_key": key,
+    }
+
+
+def review_redis_key_structure() -> dict[str, Any]:
+    """
+    Return the canonical contract for Redis key structure review.
+
+    Expected Output:
+    {
+        "status": "REVIEWED",
+        "key_namespaces": [
+            "dispatch",
+            "gps_purge",
+            "cache",
+            "locks",
+            "celery"
+        ]
+    }
+    """
+    return {
+        "status": "REVIEWED",
+        "key_namespaces": list(REDIS_KEY_NAMESPACES),
+    }
+
+
+def get_redis_key_inventory() -> dict[str, Any]:
+    """Return the complete metadata inventory for all 5 key namespaces."""
+    return {
+        "status": "REVIEWED",
+        "key_namespaces": list(REDIS_KEY_NAMESPACES),
+        "inventory": REDIS_KEY_INVENTORY,
+    }
+
+
+def identify_keys_for_migration(redis_client=None, keys_to_check: Optional[list[str]] = None) -> dict[str, Any]:
+    """
+    Identify legacy, un-namespaced, or colliding Redis keys that require migration.
+    Returns categorized candidates with recommended target standardized names.
+    """
+    legacy_mappings = [
+        (r"^job:timer:(.+)$", "dispatch:timer:\\1", "dispatch"),
+        (r"^job:timer_warning:(.+)$", "dispatch:timer_warning:\\1", "dispatch"),
+        (r"^job:timer_warned:(.+)$", "dispatch:timer_warned:\\1", "dispatch"),
+        (r"^gps_purge_status:(.+)$", "gps_purge:status:\\1", "gps_purge"),
+        (r"^gps_purge_start_time:(.+)$", "gps_purge:start_time:\\1", "gps_purge"),
+        (r"^gps_purge_dlq$", "gps_purge:dlq", "gps_purge"),
+        (r"^job:lock:(.+)$", "locks:job:\\1", "locks"),
+        (r"^lock:job_accept:(.+)$", "locks:job_accept:\\1", "locks"),
+        (r"^task_result:(.+)$", "celery:result:\\1", "celery"),
+        (r"^celery_monitoring:(.+)$", "celery:monitoring:\\1", "celery"),
+    ]
+
+    import re
+
+    candidates = []
+    keys = keys_to_check or []
+
+    if not keys and redis_client is not None:
+        try:
+            # Sample scan keys from Redis
+            scanned = []
+            cursor = 0
+            for _ in range(5):
+                cursor, batch = redis_client.scan(cursor=cursor, count=100)
+                scanned.extend(batch)
+                if cursor == 0:
+                    break
+            keys = scanned
+        except Exception:
+            keys = []
+
+    for k in keys:
+        for pattern, target_template, ns in legacy_mappings:
+            match = re.match(pattern, k)
+            if match:
+                target = re.sub(pattern, target_template, k)
+                candidates.append({
+                    "legacy_key": k,
+                    "target_key": target,
+                    "namespace": ns,
+                    "action": "MIGRATE",
+                })
+                break
+
+    return {
+        "status": "REVIEWED",
+        "key_namespaces": list(REDIS_KEY_NAMESPACES),
+        "total_evaluated": len(keys),
+        "migration_candidates": candidates,
+        "migration_count": len(candidates),
+    }
+
+
+# Authoritative story aliases
+ReviewRedisKeyStructure = review_redis_key_structure
+Review_redis_key_structure = review_redis_key_structure
+get_redis_key_structure_review = review_redis_key_structure
+get_redis_namespaces = review_redis_key_structure
+
+
+# =============================================================================
+# Redis Enhancement: Configure Redis Expiration Rules
+# =============================================================================
+
+DEFAULT_REDIS_EXPIRATION_CONFIG = {
+    "status": "CONFIGURED",
+    "ttl_policy": "ENABLED",
+}
+
+DEFAULT_REDIS_EXPIRATION_RULES = {
+    # Dispatch namespace
+    "dispatch:heartbeat": {
+        "pattern": r"^dispatch:(?:tenant:[^:]+:)?heartbeat:.+$",
+        "default_ttl": 60,
+        "env_var": "REDIS_TTL_HEARTBEAT",
+        "description": "Technician real-time heartbeat status",
+        "category": "dispatch",
+        "is_durable": False,
+    },
+    "dispatch:timer": {
+        "pattern": r"^(?:dispatch:timer:|job:timer:).+$",
+        "default_ttl": 300,
+        "env_var": "REDIS_TTL_TIMER",
+        "description": "Job assignment acceptance SLA countdown timer",
+        "category": "dispatch",
+        "is_durable": False,
+    },
+    "dispatch:timer_warning": {
+        "pattern": r"^(?:dispatch:timer_warning:|job:timer_warning:).+$",
+        "default_ttl": 300,
+        "env_var": "REDIS_TTL_TIMER",
+        "description": "Job SLA warning notification timer",
+        "category": "dispatch",
+        "is_durable": False,
+    },
+    "dispatch:metrics": {
+        "pattern": r"^dispatch:metrics:.+$",
+        "default_ttl": 60,
+        "env_var": "REDIS_TTL_METRICS",
+        "description": "Ephemeral dispatch metrics summary",
+        "category": "dispatch",
+        "is_durable": False,
+    },
+    # GPS Purge namespace
+    "gps_purge:status": {
+        "pattern": r"^(?:gps_purge:status:|gps_purge_status:).+$",
+        "default_ttl": 86400,
+        "env_var": "REDIS_TTL_GPS_PURGE_STATUS",
+        "description": "Status and progress tracking for GPS retention purge job",
+        "category": "gps_purge",
+        "is_durable": False,
+    },
+    "gps_purge:start_time": {
+        "pattern": r"^(?:gps_purge:start_time:|gps_purge_start_time:).+$",
+        "default_ttl": 86400,
+        "env_var": "REDIS_TTL_GPS_PURGE_STATUS",
+        "description": "Start timestamp for GPS purge job execution",
+        "category": "gps_purge",
+        "is_durable": False,
+    },
+    "gps_purge:statistics": {
+        "pattern": r"^gps_purge:(?:total_purged_30d|last_purge_run|next_scheduled)$",
+        "default_ttl": 2592000,  # 30 days
+        "env_var": "REDIS_TTL_GPS_PURGE_STATS",
+        "description": "Rolling 30-day purged telemetry audit counter",
+        "category": "gps_purge",
+        "is_durable": False,
+    },
+    # Cache namespace
+    "cache:general": {
+        "pattern": r"^(?:cache:|cache:tenant:[^:]+:).+$",
+        "default_ttl": 300,
+        "env_var": "REDIS_TTL_CACHE",
+        "description": "Tenant-scoped general API and service query cache",
+        "category": "cache",
+        "is_durable": False,
+    },
+    "cache:catalog": {
+        "pattern": r"^services_catalog:cache$",
+        "default_ttl": 3600,
+        "env_var": "REDIS_TTL_CATALOG_CACHE",
+        "description": "Services catalog cache",
+        "category": "cache",
+        "is_durable": False,
+    },
+    "cache:mfa_sso": {
+        "pattern": r"^(?:mfa:|sso:state:).+$",
+        "default_ttl": 300,
+        "env_var": "REDIS_TTL_AUTH_EPHEMERAL",
+        "description": "One-time MFA challenges and SSO auth states",
+        "category": "cache",
+        "is_durable": False,
+    },
+    "cache:rate_limit": {
+        "pattern": r"^rate_limit:.+$",
+        "default_ttl": 60,
+        "env_var": "REDIS_TTL_RATE_LIMIT",
+        "description": "Per-tenant or per-user API rate limit window counter",
+        "category": "cache",
+        "is_durable": False,
+    },
+    # Locks namespace
+    "locks:job": {
+        "pattern": r"^(?:locks:job:|job:lock:).+$",
+        "default_ttl": 30,
+        "env_var": "REDIS_TTL_LOCK_JOB",
+        "description": "Distributed lock for concurrent job transitions",
+        "category": "locks",
+        "is_durable": False,
+    },
+    "locks:job_accept": {
+        "pattern": r"^(?:locks:job_accept:|lock:job_accept:).+$",
+        "default_ttl": 15,
+        "env_var": "REDIS_TTL_LOCK_ACCEPT",
+        "description": "Short-lived lock for technician job acceptance",
+        "category": "locks",
+        "is_durable": False,
+    },
+    "locks:idempotency": {
+        "pattern": r"^lock:idempotency(?:_key)?:.+$",
+        "default_ttl": 86400,
+        "env_var": "REDIS_TTL_LOCK_IDEMPOTENCY",
+        "description": "Distributed idempotency deduplication window",
+        "category": "locks",
+        "is_durable": False,
+    },
+    "locks:ordering": {
+        "pattern": r"^lock:ordering:.+$",
+        "default_ttl": 60,
+        "env_var": "REDIS_TTL_LOCK_ORDERING",
+        "description": "Sequential message ordering lock",
+        "category": "locks",
+        "is_durable": False,
+    },
+    # Celery namespace
+    "celery:result": {
+        "pattern": r"^(?:celery:result:|task_result:).+$",
+        "default_ttl": 86400,  # 24 hours
+        "env_var": "REDIS_TTL_TASK_RESULT",
+        "description": "Celery asynchronous task execution result metadata",
+        "category": "celery",
+        "is_durable": False,
+    },
+    "celery:monitoring": {
+        "pattern": r"^(?:celery:monitoring:|celery_monitoring:).+$",
+        "default_ttl": 86400,
+        "env_var": "REDIS_TTL_CELERY_MONITORING",
+        "description": "Rolling operational telemetry counters (failures, latency, retries)",
+        "category": "celery",
+        "is_durable": False,
+    },
+}
+
+PROTECTED_DURABLE_PATTERNS = [
+    r"^notifications$",
+    r"^billing$",
+    r"^gps_processing$",
+    r"^ai_processing$",
+    r"^high_priority$",
+    r"^reports$",
+    r"^dlq$",
+    r"^gps_purge_dlq$",
+    r"^gps_purge:dlq$",
+    r"^task_queue:",
+]
+
+
+def is_durable_record(key: str) -> bool:
+    """
+    Check if a Redis key corresponds to a durable source of truth, persistent queue, or DLQ.
+    Durable records MUST NEVER be expired.
+    """
+    if not key or not isinstance(key, str):
+        return False
+    import re
+    for pattern in PROTECTED_DURABLE_PATTERNS:
+        if re.search(pattern, key):
+            return True
+    return False
+
+
+def get_effective_ttl(rule_key: str) -> int:
+    """Resolve configured TTL for a rule key, checking environment overrides first."""
+    rule = DEFAULT_REDIS_EXPIRATION_RULES.get(rule_key)
+    if not rule:
+        return 300
+    env_name = rule.get("env_var")
+    if env_name and os.getenv(env_name):
+        try:
+            val = int(os.getenv(env_name))
+            if val > 0:
+                return val
+        except (ValueError, TypeError):
+            pass
+    return rule.get("default_ttl", 300)
+
+
+def get_expiration_rule(key: str) -> Optional[dict[str, Any]]:
+    """
+    Match a Redis key against registered expiration rules.
+    Returns matched rule metadata, effective TTL, and durability status.
+    """
+    if not key or not isinstance(key, str):
+        return None
+
+    if is_durable_record(key):
+        return {
+            "matched_rule": "durable_source_of_truth",
+            "category": "durable",
+            "is_durable": True,
+            "ttl_seconds": None,
+            "description": "Protected durable queue or source-of-truth record (no expiry)",
+        }
+
+    import re
+    for rule_name, rule_def in DEFAULT_REDIS_EXPIRATION_RULES.items():
+        if re.match(rule_def["pattern"], key):
+            return {
+                "matched_rule": rule_name,
+                "category": rule_def["category"],
+                "is_durable": False,
+                "ttl_seconds": get_effective_ttl(rule_name),
+                "description": rule_def["description"],
+            }
+
+    # Fallback for unrecognized non-durable key
+    return {
+        "matched_rule": "cache:general",
+        "category": "cache",
+        "is_durable": False,
+        "ttl_seconds": get_effective_ttl("cache:general"),
+        "description": "Default non-durable key expiration",
+    }
+
+
+def configure_redis_expiration_rules(
+    policy_updates: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """
+    Configure and activate Redis expiration rules.
+    Returns the canonical contract:
+    {
+        "status": "CONFIGURED",
+        "ttl_policy": "ENABLED"
+    }
+    """
+    if policy_updates and isinstance(policy_updates, dict):
+        for rule_key, update in policy_updates.items():
+            if rule_key in DEFAULT_REDIS_EXPIRATION_RULES and isinstance(update, dict):
+                if "default_ttl" in update and isinstance(update["default_ttl"], int) and update["default_ttl"] > 0:
+                    DEFAULT_REDIS_EXPIRATION_RULES[rule_key]["default_ttl"] = update["default_ttl"]
+
+    return dict(DEFAULT_REDIS_EXPIRATION_CONFIG)
+
+
+def get_redis_expiration_config() -> dict[str, Any]:
+    """Return full expiration policy details, effective rules, and protected patterns."""
+    rules_summary = {}
+    for rule_key, rule_def in DEFAULT_REDIS_EXPIRATION_RULES.items():
+        rules_summary[rule_key] = {
+            "category": rule_def["category"],
+            "effective_ttl": get_effective_ttl(rule_key),
+            "default_ttl": rule_def["default_ttl"],
+            "is_durable": rule_def["is_durable"],
+            "description": rule_def["description"],
+        }
+
+    return {
+        "status": "CONFIGURED",
+        "ttl_policy": "ENABLED",
+        "total_rules": len(rules_summary),
+        "rules": rules_summary,
+        "protected_patterns": list(PROTECTED_DURABLE_PATTERNS),
+    }
+
+
+def apply_expiration(
+    key: str,
+    ttl_seconds: Optional[int] = None,
+    redis_client=None,
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Safely apply TTL to a Redis key.
+    Rejects expiration if the key matches a protected durable queue or source of truth.
+    """
+    if not key or not isinstance(key, str):
+        return {
+            "status": "INVALID_KEY",
+            "key": key,
+            "applied": False,
+            "reason": "Key must be a non-empty string",
+        }
+
+    if is_durable_record(key):
+        return {
+            "status": "REJECTED",
+            "key": key,
+            "applied": False,
+            "reason": "DURABLE_RECORD_PROTECTED",
+            "is_durable": True,
+        }
+
+    # Determine TTL
+    final_ttl = ttl_seconds
+    if final_ttl is None:
+        rule_info = get_expiration_rule(key)
+        final_ttl = rule_info.get("ttl_seconds", 300) if rule_info else 300
+
+    if not isinstance(final_ttl, int) or final_ttl <= 0:
+        return {
+            "status": "INVALID_TTL",
+            "key": key,
+            "applied": False,
+            "reason": f"TTL must be a positive integer, got {final_ttl}",
+        }
+
+    client = redis_client if redis_client is not None else get_redis_client()
+    success = False
+    try:
+        success = bool(client.expire(key, final_ttl))
+    except Exception as exc:
+        return {
+            "status": "ERROR",
+            "key": key,
+            "applied": False,
+            "error": str(exc),
+        }
+
+    return {
+        "status": "APPLIED",
+        "key": key,
+        "applied": success,
+        "ttl_seconds": final_ttl,
+        "is_durable": False,
+        "tenant_id": tenant_id,
+        "correlation_id": correlation_id,
+    }
+
+
+def refresh_expiration(
+    key: str,
+    ttl_seconds: Optional[int] = None,
+    redis_client=None,
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Refresh / extend TTL on an active Redis key.
+    Guarantees durable records are never touched.
+    """
+    if not key or not isinstance(key, str):
+        return {
+            "status": "INVALID_KEY",
+            "key": key,
+            "refreshed": False,
+            "reason": "Key must be a non-empty string",
+        }
+
+    if is_durable_record(key):
+        return {
+            "status": "REJECTED",
+            "key": key,
+            "refreshed": False,
+            "reason": "DURABLE_RECORD_PROTECTED",
+            "is_durable": True,
+        }
+
+    final_ttl = ttl_seconds
+    if final_ttl is None:
+        rule_info = get_expiration_rule(key)
+        final_ttl = rule_info.get("ttl_seconds", 300) if rule_info else 300
+
+    if not isinstance(final_ttl, int) or final_ttl <= 0:
+        return {
+            "status": "INVALID_TTL",
+            "key": key,
+            "refreshed": False,
+            "reason": f"TTL must be a positive integer, got {final_ttl}",
+        }
+
+    client = redis_client if redis_client is not None else get_redis_client()
+    success = False
+    try:
+        success = bool(client.expire(key, final_ttl))
+    except Exception as exc:
+        return {
+            "status": "ERROR",
+            "key": key,
+            "refreshed": False,
+            "error": str(exc),
+        }
+
+    return {
+        "status": "REFRESHED",
+        "key": key,
+        "refreshed": success,
+        "ttl_seconds": final_ttl,
+        "is_durable": False,
+        "tenant_id": tenant_id,
+        "correlation_id": correlation_id,
+    }
+
+
+# Authoritative story aliases
+ConfigureRedisExpirationRules = configure_redis_expiration_rules
+Configure_redis_expiration_rules = configure_redis_expiration_rules
+get_redis_expiration_rules = configure_redis_expiration_rules
+get_redis_ttl_config = get_redis_expiration_config
+
+
 

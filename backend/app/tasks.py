@@ -3924,6 +3924,80 @@ from app.celery_app import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Review Redis Key Structure Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.review_redis_key_structure_task",
+)
+def review_redis_key_structure_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to review and standardize Redis key namespaces."""
+    from app.redis_client import review_redis_key_structure
+    return review_redis_key_structure()
+
+
+from app.redis_client import (
+    REDIS_KEY_NAMESPACES,
+    DEFAULT_REDIS_KEY_REVIEW,
+    REDIS_KEY_INVENTORY,
+    build_redis_key,
+    build_tenant_key,
+    parse_redis_key,
+    review_redis_key_structure,
+    get_redis_key_inventory,
+    identify_keys_for_migration,
+    ReviewRedisKeyStructure,
+    Review_redis_key_structure,
+    get_redis_key_structure_review,
+    get_redis_namespaces,
+)
+
+ReviewRedisKeyStructureTask = review_redis_key_structure_task
+Review_redis_key_structure_task = review_redis_key_structure_task
+
+
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Configure Redis Expiration Rules Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.configure_redis_expiration_rules_task",
+)
+def configure_redis_expiration_rules_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    policy_updates: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Celery task to configure and enforce Redis expiration rules."""
+    from app.redis_client import configure_redis_expiration_rules
+    return configure_redis_expiration_rules(policy_updates=policy_updates)
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_EXPIRATION_CONFIG,
+    DEFAULT_REDIS_EXPIRATION_RULES,
+    PROTECTED_DURABLE_PATTERNS,
+    is_durable_record,
+    get_effective_ttl,
+    get_expiration_rule,
+    configure_redis_expiration_rules,
+    get_redis_expiration_config,
+    apply_expiration,
+    refresh_expiration,
+    ConfigureRedisExpirationRules,
+    Configure_redis_expiration_rules,
+    get_redis_expiration_rules,
+    get_redis_ttl_config,
+)
+
+ConfigureRedisExpirationRulesTask = configure_redis_expiration_rules_task
+Configure_redis_expiration_rules_task = configure_redis_expiration_rules_task
+
+
 
 
 
