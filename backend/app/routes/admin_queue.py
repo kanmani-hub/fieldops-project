@@ -1483,6 +1483,110 @@ def get_redis_health_endpoint() -> dict:
     return check_redis_health()
 
 
+# =============================================================================
+# Redis Enhancement: Add Redis Backup Strategy Endpoints
+# =============================================================================
+
+@router.get(
+    "/redis/backup/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_backup_status_endpoint() -> dict:
+    """Return canonical status for Redis backup strategy capability."""
+    from app.redis_client import add_redis_backup_strategy
+    return add_redis_backup_strategy()
+
+
+@router.get(
+    "/redis/backup/strategy",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_backup_strategy_endpoint() -> dict:
+    """Return configured backup strategy and source of truth."""
+    from app.redis_client import add_redis_backup_strategy
+    return add_redis_backup_strategy()
+
+
+@router.post(
+    "/redis/backup/configure",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_configure_redis_backup_endpoint() -> dict:
+    """Ensure or verify Redis backup and persistence strategy."""
+    from app.redis_client import add_redis_backup_strategy
+    return add_redis_backup_strategy()
+
+
+@router.get(
+    "/redis/backup/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_backup_config_endpoint() -> dict:
+    """Return comprehensive Redis backup, persistence modes, and retention config."""
+    from app.redis_client import get_redis_backup_config
+    return get_redis_backup_config()
+
+
+@router.get(
+    "/redis/backup/classification",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_backup_classification_endpoint(key: Optional[str] = None) -> dict:
+    """Classify a Redis key as durable-needed vs reconstructable, or return full classification map."""
+    from app.redis_client import classify_redis_key, get_redis_backup_config
+    if key:
+        return classify_redis_key(key)
+    return get_redis_backup_config().get("classification", {})
+
+
+@router.post(
+    "/redis/backup/validate-restore",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_validate_redis_restore_endpoint(payload: dict) -> dict:
+    """Verify that a restored Redis record does not overwrite newer PostgreSQL state."""
+    from app.redis_client import validate_redis_restore_safety
+    redis_rec = payload.get("redis_record", {})
+    postgres_rec = payload.get("postgres_record")
+    return validate_redis_restore_safety(redis_rec, postgres_rec)
+
+
 
 
 

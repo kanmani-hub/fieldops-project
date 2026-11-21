@@ -1427,3 +1427,20 @@ from app.redis_client import (
     get_redis_fallback_mode,
 )
 
+
+# ---------------------------------------------------------------------------
+# Redis Backup Strategy Re-exports (Story: Add Redis backup strategy)
+# ---------------------------------------------------------------------------
+
+from app.redis_client import (
+    DEFAULT_REDIS_BACKUP_CONFIG,
+    add_redis_backup_strategy,
+    get_redis_backup_config,
+    classify_redis_key,
+    validate_redis_restore_safety,
+    AddRedisBackupStrategy,
+    Add_redis_backup_strategy,
+    get_redis_backup_strategy,
+    get_redis_backup_status,
+)
+

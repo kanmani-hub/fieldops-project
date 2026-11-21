@@ -365,5 +365,27 @@ services:
           --operation DESCRIBE \
           --group "$$KAFKA_NOTIFICATIONS_CONSUMER_GROUP"
 
+  redis:
+    image: redis:7-alpine
+    container_name: fieldops-redis
+    command: >
+      redis-server
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --appendonly yes
+      --appendfsync everysec
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
   kafka_data:
+  redis_data:

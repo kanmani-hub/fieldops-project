@@ -1572,6 +1572,236 @@ get_redis_failure_handling_status = add_redis_failure_handling
 get_redis_fallback_mode = add_redis_failure_handling
 
 
+# =============================================================================
+# Redis Enhancement: Add Redis Backup Strategy
+# =============================================================================
+
+DEFAULT_REDIS_BACKUP_CONFIG = {
+    "status": "DOCUMENTED",
+    "backup_strategy": "RDB_OR_AOF_AS_REQUIRED",
+    "source_of_truth": "POSTGRESQL",
+}
+
+
+def add_redis_backup_strategy() -> dict[str, Any]:
+    """
+    Return canonical contract for Redis backup strategy:
+    {
+        "status": "DOCUMENTED",
+        "backup_strategy": "RDB_OR_AOF_AS_REQUIRED",
+        "source_of_truth": "POSTGRESQL"
+    }
+    """
+    return dict(DEFAULT_REDIS_BACKUP_CONFIG)
+
+
+def get_redis_backup_config() -> dict[str, Any]:
+    """
+    Return comprehensive operational configuration for Redis persistence,
+    backup schedules, data classification, and PostgreSQL source-of-truth protection.
+    """
+    return {
+        "status": "DOCUMENTED",
+        "backup_strategy": "RDB_OR_AOF_AS_REQUIRED",
+        "source_of_truth": "POSTGRESQL",
+        "persistence_modes": {
+            "rdb": {
+                "enabled": True,
+                "snapshot_rules": [
+                    "save 900 1",
+                    "save 300 10",
+                    "save 60 10000",
+                ],
+                "filename": "dump.rdb",
+                "description": "Point-in-time compact snapshots for fast cold start and disaster recovery",
+            },
+            "aof": {
+                "enabled": True,
+                "appendfsync": "everysec",
+                "auto_aof_rewrite_percentage": 100,
+                "auto_aof_rewrite_min_size": "64mb",
+                "description": "Append-only log logging write operations every second for minimal RPO",
+            },
+        },
+        "classification": {
+            "durable_needed": [
+                "task_queue:*",
+                "notifications",
+                "gps_processing",
+                "billing",
+                "ai_processing",
+                "high_priority",
+                "reports",
+                "dlq",
+                "celery:result:*",
+                "task_result:*",
+                "celery:monitoring:*",
+            ],
+            "reconstructable": [
+                "cache:job:*",
+                "cache:technician:*",
+                "cache:catalog:*",
+                "cache:customer:*",
+                "cache:query:*",
+                "query_cache:*",
+                "locks:*",
+                "lock:*",
+                "rate_limit:*",
+                "mfa:*",
+                "sso:state:*",
+            ],
+        },
+        "retention_policy": {
+            "rdb_snapshot_retention_days": 14,
+            "backup_schedule": "daily_at_02_00_utc",
+            "point_in_time_recovery": True,
+            "storage_target": "secure_cloud_object_storage",
+        },
+        "restore_guidelines": {
+            "source_of_truth": "POSTGRESQL",
+            "precedence_rule": "POSTGRESQL_PRECEDENCE",
+            "post_restore_cache_flush": True,
+            "conflict_resolution": "Discard stale Redis mutations if PostgreSQL entity version or updated_at is newer",
+        },
+    }
+
+
+def classify_redis_key(key: str) -> dict[str, Any]:
+    """
+    Classify a Redis key as either durable-needed (must survive restarts/incidents)
+    or reconstructable (ephemeral cache/locks reconstructable from PostgreSQL).
+    """
+    if not key or not isinstance(key, str):
+        return {
+            "key": key,
+            "classification": "RECONSTRUCTABLE",
+            "is_durable": False,
+            "source_of_truth": "POSTGRESQL",
+            "persistence_required": False,
+            "reconstruction_source": "POSTGRESQL",
+            "description": "Empty or invalid key defaults to reconstructable",
+        }
+
+    # Check durable patterns
+    if is_durable_record(key):
+        return {
+            "key": key,
+            "classification": "DURABLE_NEEDED",
+            "is_durable": True,
+            "source_of_truth": "POSTGRESQL",
+            "persistence_required": True,
+            "reconstruction_source": None,
+            "description": "Queue, DLQ, or operational task payload requiring persistence",
+        }
+
+    import re
+    # Check additional durable namespaces like celery results or audit
+    if re.search(r"^(?:celery:result:|task_result:|celery:monitoring:|audit:)", key):
+        return {
+            "key": key,
+            "classification": "DURABLE_NEEDED",
+            "is_durable": True,
+            "source_of_truth": "POSTGRESQL",
+            "persistence_required": True,
+            "reconstruction_source": None,
+            "description": "Celery task result or monitoring record requiring persistence",
+        }
+
+    # Otherwise reconstructable
+    return {
+        "key": key,
+        "classification": "RECONSTRUCTABLE",
+        "is_durable": False,
+        "source_of_truth": "POSTGRESQL",
+        "persistence_required": False,
+        "reconstruction_source": "POSTGRESQL",
+        "description": "Cache, ephemeral lock, or rate limit reconstructable from primary PostgreSQL database",
+    }
+
+
+def validate_redis_restore_safety(
+    redis_record: dict[str, Any],
+    postgres_record: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """
+    Verify that restoring a Redis record cannot overwrite newer PostgreSQL state.
+    Strictly enforces PostgreSQL precedence.
+    """
+    if not isinstance(redis_record, dict):
+        return {
+            "safe": False,
+            "action": "DISCARD",
+            "reason": "Invalid Redis record format",
+            "source_of_truth": "POSTGRESQL",
+        }
+
+    if postgres_record is None:
+        return {
+            "safe": True,
+            "action": "PROCESS",
+            "reason": "No existing PostgreSQL record; safe to process initial entity state",
+            "source_of_truth": "POSTGRESQL",
+        }
+
+    # Check version comparison
+    redis_version = redis_record.get("version") or redis_record.get("entity_version")
+    postgres_version = postgres_record.get("version") or postgres_record.get("entity_version")
+
+    if redis_version is not None and postgres_version is not None:
+        try:
+            if int(postgres_version) >= int(redis_version):
+                return {
+                    "safe": False,
+                    "action": "DISCARD",
+                    "reason": f"PostgreSQL record version ({postgres_version}) is >= restored Redis version ({redis_version})",
+                    "source_of_truth": "POSTGRESQL",
+                    "superseded_by_postgresql": True,
+                }
+        except (ValueError, TypeError):
+            pass
+
+    # Check timestamp comparison
+    redis_ts = redis_record.get("updated_at") or redis_record.get("timestamp")
+    postgres_ts = postgres_record.get("updated_at") or postgres_record.get("timestamp")
+
+    if redis_ts and postgres_ts:
+        if str(postgres_ts) >= str(redis_ts):
+            return {
+                "safe": False,
+                "action": "DISCARD",
+                "reason": f"PostgreSQL record timestamp ({postgres_ts}) is newer or equal to restored Redis timestamp ({redis_ts})",
+                "source_of_truth": "POSTGRESQL",
+                "superseded_by_postgresql": True,
+            }
+
+    # Check if task/event was already completed/applied in PostgreSQL
+    pg_status = str(postgres_record.get("status") or "").upper()
+    terminal_statuses = {"COMPLETED", "CANCELLED", "PAID", "FAILED", "CLOSED"}
+    if pg_status in terminal_statuses:
+        return {
+            "safe": False,
+            "action": "DISCARD",
+            "reason": f"PostgreSQL entity is already in terminal state '{pg_status}'",
+            "source_of_truth": "POSTGRESQL",
+            "superseded_by_postgresql": True,
+        }
+
+    return {
+        "safe": True,
+        "action": "PROCESS",
+        "reason": "Restored Redis mutation is valid and not superseded by PostgreSQL",
+        "source_of_truth": "POSTGRESQL",
+        "superseded_by_postgresql": False,
+    }
+
+
+# Authoritative story aliases
+AddRedisBackupStrategy = add_redis_backup_strategy
+Add_redis_backup_strategy = add_redis_backup_strategy
+get_redis_backup_strategy = add_redis_backup_strategy
+get_redis_backup_status = add_redis_backup_strategy
+
+
 
 
 

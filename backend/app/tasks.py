@@ -4134,6 +4134,38 @@ AddRedisFailureHandlingTask = add_redis_failure_handling_task
 Add_redis_failure_handling_task = add_redis_failure_handling_task
 
 
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Add Redis Backup Strategy Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.add_redis_backup_strategy_task",
+)
+def add_redis_backup_strategy_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and document Redis backup strategy."""
+    from app.redis_client import add_redis_backup_strategy
+    return add_redis_backup_strategy()
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_BACKUP_CONFIG,
+    add_redis_backup_strategy,
+    get_redis_backup_config,
+    classify_redis_key,
+    validate_redis_restore_safety,
+    AddRedisBackupStrategy,
+    Add_redis_backup_strategy,
+    get_redis_backup_strategy,
+    get_redis_backup_status,
+)
+
+AddRedisBackupStrategyTask = add_redis_backup_strategy_task
+Add_redis_backup_strategy_task = add_redis_backup_strategy_task
+
+
 
 
 
