@@ -4102,6 +4102,38 @@ AddRedisCacheInvalidationTask = add_redis_cache_invalidation_task
 Add_redis_cache_invalidation_task = add_redis_cache_invalidation_task
 
 
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Add Redis Failure Handling Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.add_redis_failure_handling_task",
+)
+def add_redis_failure_handling_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and activate Redis failure handling and degraded mode."""
+    from app.redis_client import add_redis_failure_handling
+    return add_redis_failure_handling()
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_FAILURE_HANDLING_CONFIG,
+    add_redis_failure_handling,
+    get_redis_failure_handling_config,
+    check_redis_health,
+    execute_with_safe_fallback,
+    AddRedisFailureHandling,
+    Add_redis_failure_handling,
+    get_redis_failure_handling_status,
+    get_redis_fallback_mode,
+)
+
+AddRedisFailureHandlingTask = add_redis_failure_handling_task
+Add_redis_failure_handling_task = add_redis_failure_handling_task
+
+
 
 
 

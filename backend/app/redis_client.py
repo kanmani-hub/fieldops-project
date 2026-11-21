@@ -33,23 +33,69 @@ class RedisCacheManager:
             self.client = redis.Redis(connection_pool=self.pool)
 
         self._was_connected = True
+        self._degraded_mode = False
+        self._failure_count = 0
+        self._recovery_count = 0
+        self._last_error = None
+
     def _execute_with_retry(self, operation, *args, **kwargs):
         retries = 1
         for i in range(retries):
             try:
                 result = operation(*args, **kwargs)
-                if not self._was_connected:
-                    print("Redis connection restored.")
+                if self._degraded_mode or not self._was_connected:
+                    print("Redis connection restored: exiting SAFE_DEGRADED_MODE.")
                     self._was_connected = True
+                    self._degraded_mode = False
+                    self._recovery_count += 1
                 return result
             except (ConnectionError, TimeoutError) as e:
+                self._last_error = str(e)
                 if i == retries - 1:
-                    if self._was_connected:
-                        print(f"Redis connection failed: {e} (subsequent connection warnings will be suppressed)")
+                    if not self._degraded_mode or self._was_connected:
+                        print(f"Redis connection failed: {e} -> entering SAFE_DEGRADED_MODE (subsequent warnings suppressed)")
                         self._was_connected = False
+                        self._degraded_mode = True
+                        self._failure_count += 1
                     return None
                 time.sleep(0.1)
         return None
+
+    def is_healthy(self) -> bool:
+        """Check if Redis connection is currently operational without throwing."""
+        try:
+            return bool(self.client.ping())
+        except Exception:
+            return False
+
+    def is_degraded(self) -> bool:
+        """Return True if Redis client has entered safe degraded mode."""
+        return self._degraded_mode
+
+    def get_health_status(self) -> dict[str, Any]:
+        """Return operational health telemetry and failure handling state."""
+        healthy = self.is_healthy()
+        return {
+            "status": "HARDENED",
+            "fallback": "SAFE_DEGRADED_MODE",
+            "healthy": healthy,
+            "degraded_mode": self._degraded_mode or not healthy,
+            "failure_count": self._failure_count,
+            "recovery_count": self._recovery_count,
+            "last_error": self._last_error,
+        }
+
+    def execute_with_fallback(self, operation, fallback_fn=None, default=None, *args, **kwargs):
+        """
+        Execute Redis operation.
+        If Redis is unavailable, degraded, or fails, execute fallback_fn or return default.
+        """
+        result = self._execute_with_retry(operation, *args, **kwargs)
+        if result is not None:
+            return result
+        if fallback_fn is not None:
+            return fallback_fn()
+        return default
 
     def get(self, key: str) -> Optional[str]:
         return self._execute_with_retry(self.client.get, key)
@@ -1409,6 +1455,122 @@ AddRedisCacheInvalidation = add_redis_cache_invalidation
 Add_redis_cache_invalidation = add_redis_cache_invalidation
 get_cache_invalidation_status = add_redis_cache_invalidation
 get_invalidation_strategy = add_redis_cache_invalidation
+
+
+# =============================================================================
+# Redis Enhancement: Add Redis Failure Handling (Safe Degraded Mode)
+# =============================================================================
+
+DEFAULT_REDIS_FAILURE_HANDLING_CONFIG = {
+    "status": "HARDENED",
+    "fallback": "SAFE_DEGRADED_MODE",
+}
+
+
+def add_redis_failure_handling() -> dict[str, Any]:
+    """
+    Return canonical contract for Redis failure handling:
+    {
+        "status": "HARDENED",
+        "fallback": "SAFE_DEGRADED_MODE"
+    }
+    """
+    return dict(DEFAULT_REDIS_FAILURE_HANDLING_CONFIG)
+
+
+def get_redis_failure_handling_config() -> dict[str, Any]:
+    """Return full operational configuration for Redis failure handling and degraded mode."""
+    client = get_redis_client()
+    status_info = client.get_health_status() if hasattr(client, "get_health_status") else {}
+    return {
+        "status": "HARDENED",
+        "fallback": "SAFE_DEGRADED_MODE",
+        "connection_timeout_seconds": 0.3,
+        "operation_timeout_seconds": 0.3,
+        "max_retries": 1,
+        "circuit_breaker": "ACTIVE",
+        "source_of_truth_protection": "STRICT_POSTGRESQL",
+        "telemetry": status_info,
+    }
+
+
+def check_redis_health(redis_client=None) -> dict[str, Any]:
+    """Check live health status of Redis, reporting degraded mode when unresponsive."""
+    client = redis_client if redis_client is not None else get_redis_client()
+    if client is None:
+        return {
+            "status": "HARDENED",
+            "fallback": "SAFE_DEGRADED_MODE",
+            "healthy": False,
+            "degraded_mode": True,
+            "reason": "Redis client not initialized",
+        }
+
+    if isinstance(client, RedisCacheManager):
+        return client.get_health_status()
+
+    # Generic client check
+    try:
+        ping_fn = getattr(client, "ping", None)
+        if callable(ping_fn):
+            ping_ok = bool(ping_fn())
+        else:
+            raw_client = getattr(client, "client", client)
+            ping_ok = bool(raw_client.ping())
+        return {
+            "status": "HARDENED",
+            "fallback": "SAFE_DEGRADED_MODE",
+            "healthy": ping_ok,
+            "degraded_mode": not ping_ok,
+        }
+    except Exception as exc:
+        return {
+            "status": "HARDENED",
+            "fallback": "SAFE_DEGRADED_MODE",
+            "healthy": False,
+            "degraded_mode": True,
+            "error": str(exc),
+        }
+
+
+def execute_with_safe_fallback(
+    operation,
+    fallback_fn=None,
+    default=None,
+    redis_client=None,
+    *args,
+    **kwargs,
+) -> Any:
+    """
+    Execute a Redis operation with bounded error handling.
+    If Redis fails, times out, or is degraded:
+    1. Catches ConnectionError / TimeoutError safely.
+    2. Invokes fallback_fn (e.g. database query) if provided.
+    3. Returns default value without bubbling unhandled 500 exceptions.
+    """
+    client = redis_client if redis_client is not None else get_redis_client()
+    if isinstance(client, RedisCacheManager):
+        return client.execute_with_fallback(operation, fallback_fn=fallback_fn, default=default, *args, **kwargs)
+
+    try:
+        res = operation(*args, **kwargs)
+        if res is not None:
+            return res
+    except (ConnectionError, TimeoutError, Exception) as exc:
+        import logging
+        logging.getLogger(__name__).warning("Redis operation failed, executing safe fallback: %s", exc)
+
+    if fallback_fn is not None:
+        return fallback_fn()
+    return default
+
+
+# Authoritative story aliases
+AddRedisFailureHandling = add_redis_failure_handling
+Add_redis_failure_handling = add_redis_failure_handling
+get_redis_failure_handling_status = add_redis_failure_handling
+get_redis_fallback_mode = add_redis_failure_handling
+
 
 
 

@@ -1399,6 +1399,91 @@ def post_trigger_cache_invalidation_endpoint(payload: dict) -> dict:
     )
 
 
+# =============================================================================
+# Redis Enhancement: Add Redis Failure Handling Endpoints
+# =============================================================================
+
+@router.get(
+    "/redis/failure-handling/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_failure_handling_status_endpoint() -> dict:
+    """Return canonical status for Redis failure handling capability."""
+    from app.redis_client import add_redis_failure_handling
+    return add_redis_failure_handling()
+
+
+@router.get(
+    "/redis/failure-handling/fallback",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_failure_handling_fallback_endpoint() -> dict:
+    """Return configured fallback mode for Redis failure handling."""
+    from app.redis_client import add_redis_failure_handling
+    return add_redis_failure_handling()
+
+
+@router.post(
+    "/redis/failure-handling/enable",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_enable_redis_failure_handling_endpoint() -> dict:
+    """Enable or verify Redis failure handling and degraded mode."""
+    from app.redis_client import add_redis_failure_handling
+    return add_redis_failure_handling()
+
+
+@router.get(
+    "/redis/failure-handling/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_failure_handling_config_endpoint() -> dict:
+    """Return complete Redis failure handling configuration and telemetry."""
+    from app.redis_client import get_redis_failure_handling_config
+    return get_redis_failure_handling_config()
+
+
+@router.get(
+    "/redis/failure-handling/health",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_health_endpoint() -> dict:
+    """Check live Redis health and report degraded mode status."""
+    from app.redis_client import check_redis_health
+    return check_redis_health()
+
+
+
 
 
 

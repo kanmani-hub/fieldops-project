@@ -23,6 +23,24 @@ celery_app = Celery(
     backend=redis_url,
 )
 
+# Bounded Redis broker connection retry & failure handling settings
+celery_app.conf.update(
+    broker_connection_retry_on_startup=True,
+    broker_connection_max_retries=5,
+    broker_transport_options={
+        "visibility_timeout": 3600,
+        "socket_timeout": 5.0,
+        "socket_connect_timeout": 5.0,
+        "max_retries": 3,
+        "interval_start": 0,
+        "interval_step": 0.2,
+        "interval_max": 0.5,
+    },
+    result_backend_transport_options={
+        "retry_on_timeout": True,
+    },
+)
+
 
 # ---------------------------------------------------------------------------
 # Queue Definitions & Routing Rules (Dedicated Queues)
@@ -1391,3 +1409,21 @@ if "app.tasks.auto_requeue_dlq" not in celery_app.tasks:
     logging.getLogger(__name__).warning(
         "app.tasks.auto_requeue_dlq is not registered with celery_app"
     )
+
+
+# ---------------------------------------------------------------------------
+# Redis Failure Handling Re-exports (Story: Add Redis failure handling)
+# ---------------------------------------------------------------------------
+
+from app.redis_client import (
+    DEFAULT_REDIS_FAILURE_HANDLING_CONFIG,
+    add_redis_failure_handling,
+    get_redis_failure_handling_config,
+    check_redis_health,
+    execute_with_safe_fallback,
+    AddRedisFailureHandling,
+    Add_redis_failure_handling,
+    get_redis_failure_handling_status,
+    get_redis_fallback_mode,
+)
+

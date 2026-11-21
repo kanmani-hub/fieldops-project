@@ -21,6 +21,25 @@ const io = new Server(server, {
 const redisSubscriber = new Redis({
   host: process.env.REDIS_HOST || 'localhost',
   port: process.env.REDIS_PORT || 6379,
+  connectTimeout: 5000,
+  maxRetriesPerRequest: null,
+  retryStrategy(times) {
+    const delay = Math.min(times * 200, 3000);
+    console.warn(`[Redis Subscriber] Reconnecting in ${delay}ms (attempt ${times})...`);
+    return delay;
+  },
+});
+
+redisSubscriber.on('connect', () => {
+  console.log('[Redis Subscriber] Connected to Redis successfully.');
+});
+
+redisSubscriber.on('error', (err) => {
+  console.error('[Redis Subscriber] Connection error (safe degraded mode):', err.message);
+});
+
+redisSubscriber.on('reconnecting', () => {
+  console.log('[Redis Subscriber] Reconnecting to Redis...');
 });
 
 const PORT = process.env.PORT || 4000;
