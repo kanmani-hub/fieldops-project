@@ -45,7 +45,7 @@ from ..models import (
     JobAssignment,
     CustomerFeedback,
     CustomerSupportRequest,
-    
+    ServiceCatalogItem,
 )
 from ..models.customer_profile import CustomerProfileModel
 from app.services.dispatch_scheduling import DEFAULT_VISIT_TIME, DEFAULT_TIMEZONE
@@ -629,7 +629,6 @@ async def update_customer_profile(
             ServiceRequest.linked_job_id
         ).where(
             ServiceRequest.customer_user_id == current_user.user_id,
-            ServiceRequest.tenant_id == current_user.tenant_id,
             ServiceRequest.linked_job_id.isnot(None),
         )
 
@@ -798,7 +797,6 @@ async def list_service_requests(
         )
         .filter(
             ServiceRequest.customer_user_id == current_user.user_id,
-            ServiceRequest.tenant_id == current_user.tenant_id,
         )
     )
 
@@ -887,7 +885,8 @@ async def create_service_request(
         ↓
     Create Job with selected organization's tenant_id
         ↓
-    Create ServiceRequest under customer's own tenant
+    Create ServiceRequest under the selected provider tenant,
+    with customer ownership recorded by customer_user_id
     """
 
     from ..utils import (
@@ -1009,6 +1008,29 @@ async def create_service_request(
             "preferred_visit_date": str(data.preferred_visit_date) if data.preferred_visit_date else None,
         }
 
+    # Customer marketplace bookings must match an active provider catalogue
+    # entry at all three taxonomy levels. Keep the submitted values as the
+    # canonical values passed to the Planning Agent.
+    service_type_for_catalog = str(
+        data.service_type or job_req.get("service_type") or job_req.get("service") or ""
+    ).strip()
+    category_for_catalog = str(
+        category_val or job_req.get("category") or job_req.get("title") or ""
+    ).strip()
+    issue_for_catalog = str(issue_val or job_req.get("issue") or "").strip()
+
+    if not (service_type_for_catalog and category_for_catalog and issue_for_catalog):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Please select a service type, category, and issue from the service catalogue.",
+        )
+
+    job_req["service"] = service_type_for_catalog
+    job_req["service_type"] = service_type_for_catalog
+    job_req["category"] = category_for_catalog
+    job_req["issue"] = issue_for_catalog
+    job_req["requires_catalog_offering"] = True
+
     # Step 2: Determine next real Job ID from DB
     from sqlalchemy import func, text
     max_id = db.query(func.max(Job.id)).scalar()
@@ -1071,22 +1093,36 @@ async def create_service_request(
     if top_3:
         selected_tenant_id = top_3[0]["organization_id"]
     else:
-        # Keep ownership in the nearest active organization when no eligible
-        # technicians are available; the scheduler will retry at dispatch time.
+        # A provider without an eligible technician may still own the request
+        # for scheduler retry, but it must explicitly offer this exact active
+        # service type, category, and issue. Never fall back to an unrelated
+        # nearest organization.
         organizations = (
             db.query(Organization)
+            .join(
+                ServiceCatalogItem,
+                ServiceCatalogItem.tenant_id == Organization.id,
+            )
             .filter(
                 Organization.site_latitude.isnot(None),
                 Organization.site_longitude.isnot(None),
                 Organization.deleted_at.is_(None),
                 Organization.status == "ACTIVE",
+                ServiceCatalogItem.is_active.is_(True),
+                func.lower(ServiceCatalogItem.service_type) == service_type_for_catalog.lower(),
+                func.lower(ServiceCatalogItem.category) == category_for_catalog.lower(),
+                func.lower(ServiceCatalogItem.issue) == issue_for_catalog.lower(),
             )
+            .distinct()
             .all()
         )
         if not organizations:
             raise HTTPException(
-                status_code=400,
-                detail=f"No organization is available with the required skill '{req_skill}' and a valid location.",
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "No active service provider currently offers the selected "
+                    "service, category, and issue. Please choose another service."
+                ),
             )
         nearest_organization = min(
             organizations,
@@ -1105,16 +1141,50 @@ async def create_service_request(
     #
     # IMPORTANT:
     #
-    # ServiceRequest tenant_id
-    #     = customer's tenant
-    #
-    # Job tenant_id
-    #     = selected service organization's tenant
-    #
-    # This is intentional.
+    # ServiceRequest.tenant_id and Job.tenant_id both identify the
+    # selected provider organization. Customer ownership is established
+    # independently through ServiceRequest.customer_user_id.
+
     # ──────────────────────────────────────────────
 
-    selected_organization = db.query(Organization).filter(Organization.id == selected_tenant_id).first()
+    selected_organization = (
+        db.query(Organization)
+        .filter(
+            Organization.id == selected_tenant_id,
+            Organization.status == "ACTIVE",
+            Organization.deleted_at.is_(None),
+        )
+        .first()
+    )
+    if not selected_organization:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The selected service provider is no longer available. Please try again.",
+        )
+
+    # Re-check the exact active offering immediately before creating the Job.
+    # This also protects against a catalogue entry being disabled while AI
+    # planning is running.
+    selected_offering = (
+        db.query(ServiceCatalogItem.id)
+        .filter(
+            ServiceCatalogItem.tenant_id == str(selected_organization.id),
+            ServiceCatalogItem.is_active.is_(True),
+            func.lower(ServiceCatalogItem.service_type) == service_type_for_catalog.lower(),
+            func.lower(ServiceCatalogItem.category) == category_for_catalog.lower(),
+            func.lower(ServiceCatalogItem.issue) == issue_for_catalog.lower(),
+        )
+        .first()
+    )
+    if not selected_offering:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "The selected provider no longer offers this exact service. "
+                "Please refresh the catalogue and try again."
+            ),
+        )
+
     selected_settings = getattr(selected_organization, "settings", None) or {}
     selected_timezone = selected_settings.get("timezone", DEFAULT_TIMEZONE) if isinstance(selected_settings, dict) else DEFAULT_TIMEZONE
 
@@ -1181,7 +1251,7 @@ async def create_service_request(
         sr = ServiceRequest(
             request_number=_generate_request_number(),
             customer_user_id=current_user.user_id,
-            tenant_id=current_user.tenant_id,
+            tenant_id=selected_tenant_id,
             title=data.title,
             description=data.description,
             service_type=data.service_type,
@@ -1203,7 +1273,7 @@ async def create_service_request(
         audit_log(
             db,
             action=AuditAction.SERVICE_REQUEST_CREATED,
-            tenant_id=current_user.tenant_id,
+            tenant_id=selected_tenant_id,
             user_id=current_user.user_id,
             role=current_user.role.value,
             entity_type="service_request",
@@ -1303,7 +1373,6 @@ async def get_service_request(
     sr = db.query(ServiceRequest).filter(
         ServiceRequest.id == sr_id,
         ServiceRequest.customer_user_id == current_user.user_id,
-        ServiceRequest.tenant_id == current_user.tenant_id,
     ).first()
 
     if not sr:
@@ -1335,7 +1404,6 @@ async def update_service_request(
         .filter(
             ServiceRequest.id == sr_id,
             ServiceRequest.customer_user_id == current_user.user_id,
-            ServiceRequest.tenant_id == current_user.tenant_id,
         )
         .with_for_update()
         .first()
@@ -1355,7 +1423,6 @@ async def update_service_request(
             .filter(
                 ServiceRequest.id == sr.id,
                 ServiceRequest.customer_user_id == current_user.user_id,
-                ServiceRequest.tenant_id == current_user.tenant_id,
                 Job.id == sr.linked_job_id,
                 or_(
                     Job.customer_id == str(current_user.user_id),
@@ -1406,7 +1473,7 @@ async def update_service_request(
     audit_log(
         db,
         action=AuditAction.SERVICE_REQUEST_UPDATED,
-        tenant_id=current_user.tenant_id,
+        tenant_id=sr.tenant_id,
         user_id=current_user.user_id,
         role=current_user.role.value,
         entity_type="service_request",
@@ -1447,7 +1514,6 @@ async def cancel_service_request(
         .filter(
             ServiceRequest.id == sr_id,
             ServiceRequest.customer_user_id == current_user.user_id,
-            ServiceRequest.tenant_id == current_user.tenant_id,
         )
         .with_for_update()
         .first()
@@ -1467,7 +1533,6 @@ async def cancel_service_request(
             .filter(
                 ServiceRequest.id == sr.id,
                 ServiceRequest.customer_user_id == current_user.user_id,
-                ServiceRequest.tenant_id == current_user.tenant_id,
                 Job.id == sr.linked_job_id,
                 or_(
                     Job.customer_id == str(current_user.user_id),
@@ -1537,7 +1602,7 @@ async def cancel_service_request(
     audit_log(
         db,
         action=AuditAction.SERVICE_REQUEST_CANCELLED,
-        tenant_id=current_user.tenant_id,
+        tenant_id=sr.tenant_id,
         user_id=current_user.user_id,
         role=current_user.role.value,
         entity_type="service_request",
@@ -1580,7 +1645,6 @@ def _customer_invoice_query(
         )
         .filter(
             ServiceRequest.customer_user_id == current_user.user_id,
-            ServiceRequest.tenant_id == current_user.tenant_id,
             ServiceRequest.linked_job_id.isnot(None),
             or_(
                 Job.customer_id == str(current_user.user_id),
@@ -2010,7 +2074,6 @@ async def track_customer_jobs(
         .join(ServiceRequest, ServiceRequest.linked_job_id == Job.id)
         .filter(
             ServiceRequest.customer_user_id == current_user.user_id,
-            ServiceRequest.tenant_id == current_user.tenant_id,
             ServiceRequest.linked_job_id.isnot(None),
             or_(
                 Job.customer_id == str(current_user.user_id),
@@ -2262,7 +2325,6 @@ async def get_customer_job_detail(
                 Job.customer_id.is_(None),
             ),
             ServiceRequest.customer_user_id == current_user.user_id,
-            ServiceRequest.tenant_id == current_user.tenant_id,
         )
         .first()
     )
@@ -2453,7 +2515,6 @@ async def download_customer_job_report(
         .filter(
             Job.id == job_id,
             ServiceRequest.customer_user_id == current_user.user_id,
-            ServiceRequest.tenant_id == current_user.tenant_id,
             or_(
                 Job.customer_id == str(current_user.user_id),
                 Job.customer_id.is_(None),
@@ -2689,7 +2750,6 @@ async def get_service_history(
         )
         .filter(
             ServiceRequest.customer_user_id == current_user.user_id,
-            ServiceRequest.tenant_id == current_user.tenant_id,
             or_(
                 func.lower(ServiceRequest.status).in_(history_statuses),
                 func.lower(Job.status).in_(history_statuses),
@@ -2779,7 +2839,6 @@ def _get_customer_feedback_job(
         .filter(
             ServiceRequest.linked_job_id == job_id,
             ServiceRequest.customer_user_id == current_user.user_id,
-            ServiceRequest.tenant_id == current_user.tenant_id,
         )
         .first()
     )
@@ -3060,7 +3119,7 @@ async def register_customer_notification_device(
         db.query(User)
         .filter(
             User.id == str(current_user.user_id),
-            User.tenant_id == str(current_user.tenant_id),
+            User.tenant_id == current_user.tenant_id,
             User.role == UserRole.CUSTOMER.value,
             User.is_active.is_(True),
             User.deleted_at.is_(None),
@@ -3095,7 +3154,7 @@ async def unregister_customer_notification_device(
         db.query(User)
         .filter(
             User.id == str(current_user.user_id),
-            User.tenant_id == str(current_user.tenant_id),
+            User.tenant_id == current_user.tenant_id,
             User.role == UserRole.CUSTOMER.value,
         )
         .first()
@@ -3130,7 +3189,7 @@ async def get_customer_notification_preferences(
 
     try:
         return service.get_preferences(
-            tenant_id=str(current_user.tenant_id),
+            tenant_id=current_user.tenant_id,
             customer_id=str(current_user.user_id),
         )
 
@@ -3183,7 +3242,7 @@ async def update_customer_notification_preferences(
 
     try:
         return service.update_preferences(
-            tenant_id=str(current_user.tenant_id),
+            tenant_id=current_user.tenant_id,
             customer_id=str(current_user.user_id),
             payload=data,
             actor_id=str(current_user.user_id),
@@ -3246,8 +3305,6 @@ async def get_notifications(
     notifications = db.query(
         InAppNotification
     ).filter(
-        InAppNotification.tenant_id
-        == current_user.tenant_id,
         InAppNotification.customer_user_id
         == str(current_user.user_id),
     ).order_by(
@@ -3259,8 +3316,6 @@ async def get_notifications(
     ).filter(
         InAppNotification.customer_user_id
         == str(current_user.user_id),
-        InAppNotification.tenant_id
-        == current_user.tenant_id,
         func.upper(func.trim(InAppNotification.status)) == "UNREAD",
     ).count()
 
@@ -3268,7 +3323,7 @@ async def get_notifications(
     logger.info(
         "Customer notification feed loaded",
         extra={
-            "tenant_id": str(current_user.tenant_id),
+            "tenant_id": current_user.tenant_id,
             "notification_count": len(notifications),
             "unread_count": unread_count,
             "correlation_id": correlation_id_ctx.get() or None,
@@ -3318,8 +3373,6 @@ async def mark_notification_read(
         InAppNotification
     ).filter(
         func.lower(InAppNotification.id) == func.lower(str(notification_id)),
-        InAppNotification.tenant_id
-        == current_user.tenant_id,
         InAppNotification.customer_user_id
         == str(current_user.user_id),
     ).first()
@@ -3374,8 +3427,6 @@ async def mark_all_read(
     db.query(
         InAppNotification
     ).filter(
-        InAppNotification.tenant_id
-        == current_user.tenant_id,
         InAppNotification.customer_user_id
         == str(current_user.user_id),
         func.upper(func.trim(InAppNotification.status)) == "UNREAD",
@@ -3415,8 +3466,6 @@ async def get_customer_dashboard(
     base = db.query(ServiceRequest).filter(
         ServiceRequest.customer_user_id
         == current_user.user_id,
-        ServiceRequest.tenant_id
-        == current_user.tenant_id,
     )
 
     linked_job_status = (
