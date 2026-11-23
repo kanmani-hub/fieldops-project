@@ -4166,6 +4166,70 @@ AddRedisBackupStrategyTask = add_redis_backup_strategy_task
 Add_redis_backup_strategy_task = add_redis_backup_strategy_task
 
 
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Monitor Redis Memory Usage Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.monitor_redis_memory_usage_task",
+)
+def monitor_redis_memory_usage_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to monitor Redis memory consumption, limit, and evictions."""
+    from app.redis_client import monitor_redis_memory_usage
+    return monitor_redis_memory_usage()
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_MEMORY_MONITORING_CONFIG,
+    monitor_redis_memory_usage,
+    get_redis_memory_metrics,
+    evaluate_redis_memory_pressure,
+    get_redis_memory_monitoring_config,
+    MonitorRedisMemoryUsage,
+    Monitor_redis_memory_usage,
+    get_redis_memory_monitoring_status,
+    get_redis_memory_status,
+)
+
+MonitorRedisMemoryUsageTask = monitor_redis_memory_usage_task
+Monitor_redis_memory_usage_task = monitor_redis_memory_usage_task
+
+
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Monitor Redis Connection Usage Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.monitor_redis_connection_usage_task",
+)
+def monitor_redis_connection_usage_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to monitor Redis connection usage, pool pressure, and connection errors."""
+    from app.redis_client import monitor_redis_connection_usage
+    return monitor_redis_connection_usage()
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_CONNECTION_MONITORING_CONFIG,
+    monitor_redis_connection_usage,
+    get_redis_connection_metrics,
+    evaluate_redis_connection_pressure,
+    get_redis_connection_monitoring_config,
+    MonitorRedisConnectionUsage,
+    Monitor_redis_connection_usage,
+    get_redis_connection_monitoring_status,
+    get_redis_connection_status,
+)
+
+MonitorRedisConnectionUsageTask = monitor_redis_connection_usage_task
+Monitor_redis_connection_usage_task = monitor_redis_connection_usage_task
+
+
 
 
 

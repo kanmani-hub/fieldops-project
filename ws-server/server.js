@@ -30,15 +30,20 @@ const redisSubscriber = new Redis({
   },
 });
 
+let redisErrorsCount = 0;
+let redisReconnectCount = 0;
+
 redisSubscriber.on('connect', () => {
   console.log('[Redis Subscriber] Connected to Redis successfully.');
 });
 
 redisSubscriber.on('error', (err) => {
+  redisErrorsCount++;
   console.error('[Redis Subscriber] Connection error (safe degraded mode):', err.message);
 });
 
 redisSubscriber.on('reconnecting', () => {
+  redisReconnectCount++;
   console.log('[Redis Subscriber] Reconnecting to Redis...');
 });
 
@@ -129,7 +134,13 @@ app.get('/metrics', (req, res) => {
     connections: totalConnections,
     messages_broadcasted: messagesSent,
     unique_ips: ipConnectionCounts.size,
-    uptime_seconds: process.uptime()
+    uptime_seconds: process.uptime(),
+    redis_subscriber: {
+      status: redisSubscriber.status,
+      connected: redisSubscriber.status === 'ready',
+      connection_errors: redisErrorsCount,
+      reconnect_attempts: redisReconnectCount,
+    }
   });
 });
 

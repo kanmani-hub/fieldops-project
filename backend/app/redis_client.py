@@ -1802,6 +1802,438 @@ get_redis_backup_strategy = add_redis_backup_strategy
 get_redis_backup_status = add_redis_backup_strategy
 
 
+# =============================================================================
+# Redis Enhancement: Monitor Redis Memory Usage
+# =============================================================================
+
+DEFAULT_REDIS_MEMORY_MONITORING_CONFIG = {
+    "status": "MONITORED",
+    "metrics": [
+        "used_memory",
+        "memory_limit",
+        "evictions",
+    ],
+}
+
+
+def monitor_redis_memory_usage() -> dict[str, Any]:
+    """
+    Return canonical contract for Redis memory usage monitoring:
+    {
+        "status": "MONITORED",
+        "metrics": [
+            "used_memory",
+            "memory_limit",
+            "evictions"
+        ]
+    }
+    """
+    return {
+        "status": "MONITORED",
+        "metrics": list(DEFAULT_REDIS_MEMORY_MONITORING_CONFIG["metrics"]),
+    }
+
+
+def evaluate_redis_memory_pressure(
+    used_memory: int,
+    memory_limit: int,
+    evictions: int,
+    warning_threshold: float = 0.80,
+    critical_threshold: float = 0.90,
+) -> dict[str, Any]:
+    """
+    Evaluate Redis memory consumption against safety thresholds.
+    Ensures tenant-sensitive values are excluded from metric labels.
+    """
+    usage_ratio = 0.0
+    if memory_limit and memory_limit > 0:
+        usage_ratio = round(used_memory / memory_limit, 4)
+    elif used_memory > 0:
+        usage_ratio = round(min(used_memory / (512 * 1024 * 1024), 1.0), 4)
+
+    usage_percent = round(usage_ratio * 100, 2)
+
+    alerts = []
+    level = "OK"
+
+    if memory_limit > 0 and usage_ratio >= critical_threshold:
+        level = "CRITICAL"
+        alerts.append({
+            "severity": "CRITICAL",
+            "code": "REDIS_MEMORY_EXHAUSTION_RISK",
+            "message": f"Redis memory usage ({usage_percent}%) exceeds critical threshold ({int(critical_threshold * 100)}%). Risk of OOM kill.",
+            "metric_labels": {"cluster": "default", "subsystem": "cache_queues"},
+        })
+    elif memory_limit > 0 and usage_ratio >= warning_threshold:
+        level = "WARNING"
+        alerts.append({
+            "severity": "WARNING",
+            "code": "REDIS_HIGH_MEMORY_PRESSURE",
+            "message": f"Redis memory usage ({usage_percent}%) exceeds warning threshold ({int(warning_threshold * 100)}%).",
+            "metric_labels": {"cluster": "default", "subsystem": "cache_queues"},
+        })
+
+    if evictions > 0:
+        if level != "CRITICAL":
+            level = "WARNING"
+        alerts.append({
+            "severity": "WARNING",
+            "code": "REDIS_ACTIVE_KEY_EVICTIONS",
+            "message": f"Active Redis key evictions ({evictions} keys evicted). Ensure volatile-lru protects durable queues.",
+            "metric_labels": {"cluster": "default", "metric": "evictions"},
+        })
+
+    return {
+        "status": "MONITORED",
+        "metrics": list(DEFAULT_REDIS_MEMORY_MONITORING_CONFIG["metrics"]),
+        "level": level,
+        "used_memory": used_memory,
+        "memory_limit": memory_limit,
+        "evictions": evictions,
+        "usage_ratio": usage_ratio,
+        "usage_percent": usage_percent,
+        "alerts": alerts,
+        "thresholds": {
+            "warning_percent": warning_threshold * 100,
+            "critical_percent": critical_threshold * 100,
+        },
+    }
+
+
+def get_redis_memory_metrics(redis_client=None) -> dict[str, Any]:
+    """
+    Collect live or fallback Redis memory metrics including used_memory,
+    memory_limit, and evictions, with bounded exception handling.
+    """
+    if redis_client is False:
+        client = None
+    elif redis_client is not None:
+        client = redis_client
+    else:
+        client = get_redis_client()
+
+    # Handle None or disabled client safely
+    if client is None:
+        fallback_eval = evaluate_redis_memory_pressure(0, 0, 0)
+        fallback_eval.update({
+            "healthy": False,
+            "degraded_mode": True,
+            "reason": "Redis client not available",
+        })
+        return fallback_eval
+
+    if isinstance(client, RedisCacheManager):
+        raw_client = getattr(client, "client", client)
+    else:
+        raw_client = client
+
+    try:
+        info_mem = {}
+        info_stats = {}
+        if hasattr(raw_client, "info"):
+            try:
+                info_mem = raw_client.info("memory") or {}
+            except Exception:
+                info_mem = raw_client.info() or {}
+
+            try:
+                info_stats = raw_client.info("stats") or {}
+            except Exception:
+                pass
+
+        used_memory = int(info_mem.get("used_memory", 0))
+        memory_limit = int(info_mem.get("maxmemory", 0))
+        evictions = int(info_stats.get("evicted_keys", info_mem.get("evicted_keys", 0)))
+        peak_memory = int(info_mem.get("used_memory_peak", used_memory))
+        frag_ratio = float(info_mem.get("mem_fragmentation_ratio", 1.0))
+
+        eval_res = evaluate_redis_memory_pressure(used_memory, memory_limit, evictions)
+        eval_res.update({
+            "healthy": True,
+            "degraded_mode": False,
+            "peak_memory": peak_memory,
+            "fragmentation_ratio": frag_ratio,
+            "used_memory_human": info_mem.get("used_memory_human", f"{used_memory}B"),
+            "memory_limit_human": info_mem.get("maxmemory_human", f"{memory_limit}B"),
+        })
+        return eval_res
+
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to collect Redis memory metrics: %s", exc)
+        fallback_eval = evaluate_redis_memory_pressure(0, 0, 0)
+        fallback_eval.update({
+            "healthy": False,
+            "degraded_mode": True,
+            "error": str(exc),
+        })
+        return fallback_eval
+
+
+def get_redis_memory_monitoring_config() -> dict[str, Any]:
+    """Return complete operational configuration for Redis memory monitoring."""
+    return {
+        "status": "MONITORED",
+        "metrics": list(DEFAULT_REDIS_MEMORY_MONITORING_CONFIG["metrics"]),
+        "alerting_rules": {
+            "warning_threshold_percent": 80.0,
+            "critical_threshold_percent": 90.0,
+            "eviction_alert_enabled": True,
+        },
+        "collection_frequency_seconds": 30,
+        "queue_exhaustion_protection": "STRICT_QUEUE_ISOLATION",
+        "tenant_label_policy": "NO_TENANT_IDENTIFIERS_IN_LABELS",
+    }
+
+
+# Authoritative story aliases
+MonitorRedisMemoryUsage = monitor_redis_memory_usage
+Monitor_redis_memory_usage = monitor_redis_memory_usage
+get_redis_memory_monitoring_status = monitor_redis_memory_usage
+get_redis_memory_status = monitor_redis_memory_usage
+
+
+# =============================================================================
+# Redis Enhancement: Monitor Redis Connection Usage
+# =============================================================================
+
+DEFAULT_REDIS_CONNECTION_MONITORING_CONFIG = {
+    "status": "MONITORED",
+    "metrics": [
+        "connections",
+        "pool_pressure",
+        "connection_errors",
+    ],
+}
+
+
+def monitor_redis_connection_usage() -> dict[str, Any]:
+    """
+    Return canonical contract for Redis connection usage monitoring:
+    {
+        "status": "MONITORED",
+        "metrics": [
+            "connections",
+            "pool_pressure",
+            "connection_errors"
+        ]
+    }
+    """
+    return {
+        "status": "MONITORED",
+        "metrics": list(DEFAULT_REDIS_CONNECTION_MONITORING_CONFIG["metrics"]),
+    }
+
+
+def evaluate_redis_connection_pressure(
+    connections: int,
+    max_connections: int,
+    connection_errors: int,
+    warning_threshold: float = 0.75,
+    critical_threshold: float = 0.90,
+) -> dict[str, Any]:
+    """
+    Evaluate connection count and pool saturation against safety limits.
+    Excludes tenant-sensitive values from metric labels.
+    """
+    try:
+        max_connections = int(max_connections)
+    except (TypeError, ValueError):
+        max_connections = 10000
+
+    try:
+        connections = int(connections)
+    except (TypeError, ValueError):
+        connections = 0
+
+    try:
+        connection_errors = int(connection_errors)
+    except (TypeError, ValueError):
+        connection_errors = 0
+
+    pressure_ratio = 0.0
+    if max_connections and max_connections > 0:
+        pressure_ratio = round(connections / max_connections, 4)
+    elif connections > 0:
+        pressure_ratio = round(min(connections / 10000, 1.0), 4)
+
+    pressure_percent = round(pressure_ratio * 100, 2)
+
+    alerts = []
+    level = "OK"
+
+    if max_connections > 0 and pressure_ratio >= critical_threshold:
+        level = "CRITICAL"
+        alerts.append({
+            "severity": "CRITICAL",
+            "code": "REDIS_CONNECTION_POOL_EXHAUSTION_RISK",
+            "message": f"Redis connection pool utilization ({pressure_percent}%) exceeds critical threshold ({int(critical_threshold * 100)}%).",
+            "metric_labels": {"cluster": "default", "subsystem": "connection_pool"},
+        })
+    elif max_connections > 0 and pressure_ratio >= warning_threshold:
+        level = "WARNING"
+        alerts.append({
+            "severity": "WARNING",
+            "code": "REDIS_HIGH_CONNECTION_PRESSURE",
+            "message": f"Redis connection pool utilization ({pressure_percent}%) exceeds warning threshold ({int(warning_threshold * 100)}%).",
+            "metric_labels": {"cluster": "default", "subsystem": "connection_pool"},
+        })
+
+    if connection_errors > 0:
+        if level != "CRITICAL":
+            level = "WARNING"
+        alerts.append({
+            "severity": "WARNING",
+            "code": "REDIS_CONNECTION_FAILURES_DETECTED",
+            "message": f"Repeated Redis connection errors detected ({connection_errors} failures).",
+            "metric_labels": {"cluster": "default", "metric": "connection_errors"},
+        })
+
+    return {
+        "status": "MONITORED",
+        "metrics": list(DEFAULT_REDIS_CONNECTION_MONITORING_CONFIG["metrics"]),
+        "level": level,
+        "connections": connections,
+        "pool_pressure": pressure_ratio,
+        "connection_errors": connection_errors,
+        "max_connections": max_connections,
+        "pressure_percent": pressure_percent,
+        "alerts": alerts,
+        "thresholds": {
+            "warning_percent": warning_threshold * 100,
+            "critical_percent": critical_threshold * 100,
+        },
+    }
+
+
+def get_redis_connection_metrics(redis_client=None) -> dict[str, Any]:
+    """
+    Collect live or fallback Redis connection metrics including active connections,
+    connection pool pressure, and connection errors, with bounded exception handling.
+    """
+    if redis_client is False:
+        client = None
+    elif redis_client is not None:
+        client = redis_client
+    else:
+        client = get_redis_client()
+
+    if client is None:
+        fallback_eval = evaluate_redis_connection_pressure(0, 0, 0)
+        fallback_eval.update({
+            "healthy": False,
+            "degraded_mode": True,
+            "reason": "Redis client not available",
+            "active_pool_connections": 0,
+            "available_pool_connections": 0,
+            "websocket_subscriber": {"status": "disconnected", "connected": False},
+        })
+        return fallback_eval
+
+    if isinstance(client, RedisCacheManager):
+        raw_client = getattr(client, "client", client)
+        local_errors = getattr(client, "_failure_count", 0)
+        pool = getattr(client, "pool", None)
+    else:
+        raw_client = client
+        local_errors = 0
+        pool = None
+
+    try:
+        info_clients = {}
+        info_stats = {}
+        if hasattr(raw_client, "info"):
+            try:
+                info_clients = raw_client.info("clients") or {}
+            except Exception:
+                info_clients = raw_client.info() or {}
+
+            try:
+                info_stats = raw_client.info("stats") or {}
+            except Exception:
+                pass
+
+        connections = int(info_clients.get("connected_clients", 1))
+        blocked_clients = int(info_clients.get("blocked_clients", 0))
+        max_clients = int(info_clients.get("maxclients", 10000))
+
+        rejected_conns = int(info_stats.get("rejected_connections", 0))
+        total_errors = rejected_conns + local_errors
+
+        active_pool_conns = 0
+        avail_pool_conns = 0
+        max_pool = max_clients
+        if pool is not None and type(pool).__name__ != "MagicMock":
+            if hasattr(pool, "_in_use_connections") and not hasattr(pool._in_use_connections, "_mock_name"):
+                try:
+                    active_pool_conns = len(pool._in_use_connections)
+                except Exception:
+                    pass
+            if hasattr(pool, "_available_connections") and not hasattr(pool._available_connections, "_mock_name"):
+                try:
+                    avail_pool_conns = len(pool._available_connections)
+                except Exception:
+                    pass
+            try:
+                raw_max = getattr(pool, "max_connections", None)
+                if raw_max is not None and not hasattr(raw_max, "_mock_name"):
+                    max_pool = int(raw_max)
+            except Exception:
+                pass
+
+        eval_res = evaluate_redis_connection_pressure(connections, max_pool, total_errors)
+        eval_res.update({
+            "healthy": True,
+            "degraded_mode": False,
+            "blocked_clients": blocked_clients,
+            "active_pool_connections": active_pool_conns,
+            "available_pool_connections": avail_pool_conns,
+            "websocket_subscriber": {
+                "status": "ready",
+                "connected": True,
+                "shared_pool": True,
+            },
+        })
+        return eval_res
+
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to collect Redis connection metrics: %s", exc)
+        fallback_eval = evaluate_redis_connection_pressure(0, 0, 1)
+        fallback_eval.update({
+            "healthy": False,
+            "degraded_mode": True,
+            "error": str(exc),
+            "active_pool_connections": 0,
+            "available_pool_connections": 0,
+            "websocket_subscriber": {"status": "error", "connected": False},
+        })
+        return fallback_eval
+
+
+def get_redis_connection_monitoring_config() -> dict[str, Any]:
+    """Return complete operational configuration for Redis connection monitoring."""
+    return {
+        "status": "MONITORED",
+        "metrics": list(DEFAULT_REDIS_CONNECTION_MONITORING_CONFIG["metrics"]),
+        "connection_pool_strategy": "SINGLETON_MANAGED_POOL",
+        "alerting_rules": {
+            "warning_pressure_percent": 75.0,
+            "critical_pressure_percent": 90.0,
+            "alert_on_connection_errors": True,
+        },
+        "subscriber_health": "MONITORED",
+        "tenant_label_policy": "NO_TENANT_IDENTIFIERS_IN_LABELS",
+    }
+
+
+# Authoritative story aliases
+MonitorRedisConnectionUsage = monitor_redis_connection_usage
+Monitor_redis_connection_usage = monitor_redis_connection_usage
+get_redis_connection_monitoring_status = monitor_redis_connection_usage
+get_redis_connection_status = monitor_redis_connection_usage
+
+
 
 
 

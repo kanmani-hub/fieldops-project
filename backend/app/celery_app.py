@@ -1444,3 +1444,37 @@ from app.redis_client import (
     get_redis_backup_status,
 )
 
+
+# ---------------------------------------------------------------------------
+# Redis Memory Monitoring Re-exports (Story: Monitor Redis memory usage)
+# ---------------------------------------------------------------------------
+
+from app.redis_client import (
+    DEFAULT_REDIS_MEMORY_MONITORING_CONFIG,
+    monitor_redis_memory_usage,
+    get_redis_memory_metrics,
+    evaluate_redis_memory_pressure,
+    get_redis_memory_monitoring_config,
+    MonitorRedisMemoryUsage,
+    Monitor_redis_memory_usage,
+    get_redis_memory_monitoring_status,
+    get_redis_memory_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# Redis Connection Monitoring Re-exports (Story: Monitor Redis connection usage)
+# ---------------------------------------------------------------------------
+
+from app.redis_client import (
+    DEFAULT_REDIS_CONNECTION_MONITORING_CONFIG,
+    monitor_redis_connection_usage,
+    get_redis_connection_metrics,
+    evaluate_redis_connection_pressure,
+    get_redis_connection_monitoring_config,
+    MonitorRedisConnectionUsage,
+    Monitor_redis_connection_usage,
+    get_redis_connection_monitoring_status,
+    get_redis_connection_status,
+)
+

@@ -1587,6 +1587,174 @@ def post_validate_redis_restore_endpoint(payload: dict) -> dict:
     return validate_redis_restore_safety(redis_rec, postgres_rec)
 
 
+# =============================================================================
+# Redis Enhancement: Monitor Redis Memory Usage Endpoints
+# =============================================================================
+
+@router.get(
+    "/redis/memory/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_memory_status_endpoint() -> dict:
+    """Return canonical status and monitored metric list for Redis memory usage."""
+    from app.redis_client import monitor_redis_memory_usage
+    return monitor_redis_memory_usage()
+
+
+@router.get(
+    "/redis/memory/metrics",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_memory_metrics_endpoint() -> dict:
+    """Collect and return live Redis memory metrics including used_memory, memory_limit, and evictions."""
+    from app.redis_client import get_redis_memory_metrics
+    return get_redis_memory_metrics()
+
+
+@router.post(
+    "/redis/memory/monitor",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_redis_memory_monitor_endpoint() -> dict:
+    """Trigger or verify Redis memory monitoring contract."""
+    from app.redis_client import monitor_redis_memory_usage
+    return monitor_redis_memory_usage()
+
+
+@router.get(
+    "/redis/memory/pressure",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_memory_pressure_endpoint() -> dict:
+    """Evaluate Redis memory pressure and active alerts without exposing tenant-sensitive labels."""
+    from app.redis_client import get_redis_memory_metrics
+    return get_redis_memory_metrics()
+
+
+@router.get(
+    "/redis/memory/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_memory_config_endpoint() -> dict:
+    """Return operational configuration for Redis memory monitoring and alert thresholds."""
+    from app.redis_client import get_redis_memory_monitoring_config
+    return get_redis_memory_monitoring_config()
+
+
+# =============================================================================
+# Redis Enhancement: Monitor Redis Connection Usage Endpoints
+# =============================================================================
+
+@router.get(
+    "/redis/connections/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_connection_status_endpoint() -> dict:
+    """Return canonical status and monitored metric list for Redis connection usage."""
+    from app.redis_client import monitor_redis_connection_usage
+    return monitor_redis_connection_usage()
+
+
+@router.get(
+    "/redis/connections/metrics",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_connection_metrics_endpoint() -> dict:
+    """Collect and return live Redis connection metrics including pool pressure and errors."""
+    from app.redis_client import get_redis_connection_metrics
+    return get_redis_connection_metrics()
+
+
+@router.post(
+    "/redis/connections/monitor",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_redis_connection_monitor_endpoint() -> dict:
+    """Trigger or verify Redis connection monitoring contract."""
+    from app.redis_client import monitor_redis_connection_usage
+    return monitor_redis_connection_usage()
+
+
+@router.get(
+    "/redis/connections/pressure",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_connection_pressure_endpoint() -> dict:
+    """Evaluate Redis connection pool pressure and active failure alerts."""
+    from app.redis_client import get_redis_connection_metrics
+    return get_redis_connection_metrics()
+
+
+@router.get(
+    "/redis/connections/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_connection_config_endpoint() -> dict:
+    """Return operational configuration for Redis connection monitoring and pool limits."""
+    from app.redis_client import get_redis_connection_monitoring_config
+    return get_redis_connection_monitoring_config()
+
+
 
 
 
