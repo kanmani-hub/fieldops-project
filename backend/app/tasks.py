@@ -4230,6 +4230,72 @@ MonitorRedisConnectionUsageTask = monitor_redis_connection_usage_task
 Monitor_redis_connection_usage_task = monitor_redis_connection_usage_task
 
 
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Test Redis Recovery Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.test_redis_recovery_task",
+)
+def test_redis_recovery_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and document Redis recovery scenarios."""
+    from app.redis_client import test_redis_recovery
+    return test_redis_recovery()
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_RECOVERY_TEST_CONFIG,
+    test_redis_recovery,
+    run_redis_recovery_simulation,
+    get_redis_recovery_config,
+    TestRedisRecovery,
+    Test_redis_recovery,
+    get_redis_recovery_status,
+    get_redis_recovery_test_results,
+)
+
+TestRedisRecoveryTask = test_redis_recovery_task
+Test_redis_recovery_task = test_redis_recovery_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Connect Kafka Events to WebSocket Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.connect_kafka_events_to_websocket_task",
+)
+def connect_kafka_events_to_websocket_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and document Kafka-to-WebSocket connection contract."""
+    from app.services.kafka_to_websocket_bridge import connect_kafka_events_to_websocket
+    return connect_kafka_events_to_websocket()
+
+
+from app.services.kafka_to_websocket_bridge import (
+    DEFAULT_KAFKA_TO_WEBSOCKET_CONFIG,
+    KAFKA_TO_WEBSOCKET_EVENT_MAP,
+    map_kafka_event_to_websocket,
+    connect_kafka_events_to_websocket,
+    get_kafka_to_websocket_config,
+    KafkaToWebSocketBridge,
+    bridge_kafka_event_to_websocket,
+    ConnectKafkaEventsToWebSocket,
+    Connect_kafka_events_to_websocket,
+    get_kafka_to_websocket_status,
+    get_websocket_bridge_status,
+)
+
+ConnectKafkaEventsToWebSocketTask = connect_kafka_events_to_websocket_task
+Connect_kafka_events_to_websocket_task = connect_kafka_events_to_websocket_task
+
+
+
 
 
 

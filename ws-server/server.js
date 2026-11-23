@@ -4,7 +4,29 @@ const { Server } = require('socket.io');
 const Redis = require('ioredis');
 
 const app = express();
+app.use(express.json());
 const server = http.createServer(app);
+
+// In-memory bounded deduplication for Kafka and Redis events
+const SEEN_EVENTS_MAX = 10000;
+const seenEventIds = new Set();
+const seenEventQueue = [];
+
+function isDuplicateEvent(eventId) {
+  if (!eventId) return false;
+  const strId = String(eventId);
+  if (seenEventIds.has(strId)) {
+    return true;
+  }
+  if (seenEventQueue.length >= SEEN_EVENTS_MAX) {
+    const oldest = seenEventQueue.shift();
+    seenEventIds.delete(oldest);
+  }
+  seenEventIds.add(strId);
+  seenEventQueue.push(strId);
+  return false;
+}
+
 
 const io = new Server(server, {
   cors: {
@@ -110,10 +132,15 @@ redisSubscriber.on('message', (channel, message) => {
     try {
       const payload = JSON.parse(message);
       
-      const { event, tenant_id } = payload;
+      const { event, tenant_id, event_id } = payload;
       
       if (!event || !tenant_id) {
         console.warn('Received malformed dispatch event', payload);
+        return;
+      }
+      
+      if (isDuplicateEvent(event_id)) {
+        console.log(`[Deduplication] Skipping duplicate broadcast for event_id: ${event_id}`);
         return;
       }
       
@@ -127,6 +154,54 @@ redisSubscriber.on('message', (channel, message) => {
       console.error('Error parsing dispatch event from Redis:', e);
     }
   }
+});
+
+// Canonical Kafka-to-WebSocket bridge status endpoint
+app.get('/bridge/status', (req, res) => {
+  res.json({
+    status: 'CONNECTED',
+    transport: 'KAFKA_TO_WEBSOCKET',
+    namespace: '/dispatch-dashboard',
+  });
+});
+
+// Bridge Kafka event directly via HTTP into the WebSocket server
+app.post('/bridge/kafka-event', (req, res) => {
+  const payload = req.body;
+  if (!payload || typeof payload !== 'object') {
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+
+  const { event, event_type, tenant_id, event_id } = payload;
+  const eventName = event || event_type;
+
+  if (!eventName || !tenant_id) {
+    return res.status(400).json({
+      error: 'Missing required fields: event/event_type and tenant_id are mandatory',
+    });
+  }
+
+  if (isDuplicateEvent(event_id)) {
+    return res.status(200).json({
+      status: 'SKIPPED',
+      idempotent_duplicate: true,
+      event_id: event_id,
+      tenant_id: tenant_id,
+      namespace: '/dispatch-dashboard',
+    });
+  }
+
+  dispatchNamespace.to(tenant_id).emit(eventName, payload);
+  messagesSent++;
+
+  return res.json({
+    status: 'CONNECTED',
+    transport: 'KAFKA_TO_WEBSOCKET',
+    namespace: '/dispatch-dashboard',
+    delivered: true,
+    event_id: event_id,
+    tenant_id: tenant_id,
+  });
 });
 
 app.get('/metrics', (req, res) => {

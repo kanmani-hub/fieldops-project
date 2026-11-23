@@ -622,3 +622,23 @@ def publish_analytics_event(
             "Failed to publish analytics event to Redis: %s",
             e,
         )
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Connect Kafka Events to WebSocket Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.kafka_to_websocket_bridge import (
+    DEFAULT_KAFKA_TO_WEBSOCKET_CONFIG,
+    KAFKA_TO_WEBSOCKET_EVENT_MAP,
+    map_kafka_event_to_websocket,
+    connect_kafka_events_to_websocket,
+    get_kafka_to_websocket_config,
+    KafkaToWebSocketBridge,
+    bridge_kafka_event_to_websocket,
+    ConnectKafkaEventsToWebSocket,
+    Connect_kafka_events_to_websocket,
+    get_kafka_to_websocket_status,
+    get_websocket_bridge_status,
+)
+

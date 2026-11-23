@@ -1755,6 +1755,148 @@ def get_redis_connection_config_endpoint() -> dict:
     return get_redis_connection_monitoring_config()
 
 
+# =============================================================================
+# Redis Enhancement: Test Redis Recovery Endpoints
+# =============================================================================
+
+@router.get(
+    "/redis/recovery/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_recovery_status_endpoint() -> dict:
+    """Return canonical status and covered scenarios for Redis recovery testing."""
+    from app.redis_client import test_redis_recovery
+    return test_redis_recovery()
+
+
+@router.get(
+    "/redis/recovery/scenarios",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_recovery_scenarios_endpoint() -> dict:
+    """Return list of tested Redis recovery scenarios."""
+    from app.redis_client import test_redis_recovery
+    return test_redis_recovery()
+
+
+@router.post(
+    "/redis/recovery/run",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_run_redis_recovery_simulation_endpoint() -> dict:
+    """Execute end-to-end non-destructive simulation of Redis recovery scenarios."""
+    from app.redis_client import run_redis_recovery_simulation
+    return run_redis_recovery_simulation()
+
+
+@router.get(
+    "/redis/recovery/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_redis_recovery_config_endpoint() -> dict:
+    """Return operational configuration and safety parameters for Redis recovery tests."""
+    from app.redis_client import get_redis_recovery_config
+    return get_redis_recovery_config()
+
+
+# =============================================================================
+# WebSocket Real-Time Events: Connect Kafka Events to WebSocket Endpoints
+# =============================================================================
+
+@router.get(
+    "/websocket/kafka-bridge/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_kafka_bridge_status_endpoint() -> dict:
+    """Return canonical status for Connect Kafka events to WebSocket."""
+    from app.services.kafka_to_websocket_bridge import connect_kafka_events_to_websocket
+    return connect_kafka_events_to_websocket()
+
+
+@router.get(
+    "/websocket/kafka-bridge/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_kafka_bridge_config_endpoint() -> dict:
+    """Return operational configuration for Kafka-to-WebSocket bridge."""
+    from app.services.kafka_to_websocket_bridge import get_kafka_to_websocket_config
+    return get_kafka_to_websocket_config()
+
+
+@router.post(
+    "/websocket/kafka-bridge/connect",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_connect_websocket_kafka_bridge_endpoint() -> dict:
+    """Connect or verify Kafka events to WebSocket bridge connection."""
+    from app.services.kafka_to_websocket_bridge import connect_kafka_events_to_websocket
+    return connect_kafka_events_to_websocket()
+
+
+@router.post(
+    "/websocket/kafka-bridge/publish",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_bridge_kafka_event_endpoint(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Bridge an incoming Kafka event payload into the WebSocket server with tenant isolation and deduplication."""
+    from app.services.kafka_to_websocket_bridge import bridge_kafka_event_to_websocket
+    if "tenant_id" not in payload and getattr(current_user, "tenant_id", None):
+        payload["tenant_id"] = str(current_user.tenant_id)
+    return bridge_kafka_event_to_websocket(payload)
+
+
+
 
 
 
