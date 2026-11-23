@@ -55,9 +55,39 @@ export const provisionTechnician = async (
   return response.data;
 };
 
+export interface JobStatusUpdatePayload {
+  event: string;
+  tenant_id: string;
+  job_id: string;
+  status: string;
+  old_status?: string;
+  timestamp?: string;
+  correlation_id?: string;
+  event_id?: string;
+}
+
+/**
+ * Helper to subscribe to real-time job status updates on a Socket.IO connection.
+ */
+export const subscribeJobStatusUpdates = (
+  socket: any,
+  callback: (event: JobStatusUpdatePayload) => void
+): (() => void) => {
+  if (!socket) return () => {};
+  const handler = (payload: JobStatusUpdatePayload) => {
+    callback(payload);
+  };
+  socket.on("job.status.updated", handler);
+  return () => {
+    socket.off("job.status.updated", handler);
+  };
+};
+
 const dispatcherService = {
   getDispatchers,
   provisionTechnician,
+  subscribeJobStatusUpdates,
 };
 
 export default dispatcherService;
+

@@ -4295,6 +4295,58 @@ ConnectKafkaEventsToWebSocketTask = connect_kafka_events_to_websocket_task
 Connect_kafka_events_to_websocket_task = connect_kafka_events_to_websocket_task
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Job Status Updates Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_job_status_updates_task",
+)
+def send_job_status_updates_task(
+    job_id: Union[str, int] = "123",
+    status: str = "ASSIGNED",
+    tenant_id: Union[str, int] = "tenant-1",
+    old_status: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    technician_id: Optional[Union[str, int]] = None,
+    technician_name: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    schema_version: int = 1,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative job status update to WebSocket clients."""
+    from app.services.job_status_broadcaster import send_job_status_updates
+    return send_job_status_updates(
+        job_id=job_id,
+        status=status,
+        tenant_id=tenant_id,
+        old_status=old_status,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        technician_id=technician_id,
+        technician_name=technician_name,
+        timestamp=timestamp,
+        schema_version=schema_version,
+    )
+
+
+from app.services.job_status_broadcaster import (
+    DEFAULT_JOB_STATUS_UPDATE_CONFIG,
+    send_job_status_updates,
+    get_job_status_update_config,
+    JobStatusUpdateBroadcaster,
+    SendJobStatusUpdates,
+    Send_job_status_updates,
+    broadcast_job_status_update,
+    get_job_status_update_status,
+)
+
+SendJobStatusUpdatesTask = send_job_status_updates_task
+Send_job_status_updates_task = send_job_status_updates_task
+
+
+
 
 
 

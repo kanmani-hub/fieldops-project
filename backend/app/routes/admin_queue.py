@@ -1896,6 +1896,77 @@ def post_bridge_kafka_event_endpoint(
     return bridge_kafka_event_to_websocket(payload)
 
 
+# =============================================================================
+# WebSocket Real-Time Events: Send Job Status Updates Endpoints
+# =============================================================================
+
+@router.get(
+    "/websocket/job-status/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_job_status_update_status_endpoint() -> dict:
+    """Return canonical output contract for Send job status updates."""
+    from app.services.job_status_broadcaster import send_job_status_updates
+    return send_job_status_updates()
+
+
+@router.get(
+    "/websocket/job-status/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_job_status_update_config_endpoint() -> dict:
+    """Return operational configuration for Job Status Updates service."""
+    from app.services.job_status_broadcaster import get_job_status_update_config
+    return get_job_status_update_config()
+
+
+@router.post(
+    "/websocket/job-status/send",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_send_job_status_update_endpoint(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Broadcast an authoritative job status update to the authenticated tenant room."""
+    from app.services.job_status_broadcaster import send_job_status_updates
+
+    job_id = payload.get("job_id", "123")
+    status = payload.get("status", "ASSIGNED")
+    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+
+    return send_job_status_updates(
+        job_id=job_id,
+        status=status,
+        tenant_id=tenant_id,
+        old_status=payload.get("old_status"),
+        correlation_id=payload.get("correlation_id"),
+        event_id=payload.get("event_id"),
+        technician_id=payload.get("technician_id"),
+        technician_name=payload.get("technician_name"),
+        timestamp=payload.get("timestamp"),
+    )
+
+
+
 
 
 

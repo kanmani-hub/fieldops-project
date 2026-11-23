@@ -62,6 +62,8 @@ type DispatchRealtimeEvent = {
   tenant_id?: string | number;
   old_status?: string | null;
   new_status?: string | null;
+  status?: string | null;
+  event?: string | null;
   timestamp?: string;
   technician?: {
     tech_id?: string | number;
@@ -2198,12 +2200,13 @@ const fetchCompletedCount = async () => {
         );
       }
 
+      const effectiveStatus = payload.new_status || payload.status || "";
       const eventKey = [
         eventName,
         jobKey,
         payload.timestamp || "",
         payload.old_status || "",
-        payload.new_status || "",
+        effectiveStatus,
         payload.technician?.tech_id ?? "",
       ].join("|");
 

@@ -92,6 +92,7 @@ def publish_dispatch_event(
         "idempotency_key": idempotency_key,
         "schema_version": schema_version,
         "job_id": str(job_id),
+        "status": new_status,
         "old_status": old_status,
         "new_status": new_status,
         "timestamp": timestamp,
@@ -641,4 +642,21 @@ from app.services.kafka_to_websocket_bridge import (
     get_kafka_to_websocket_status,
     get_websocket_bridge_status,
 )
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Job Status Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.job_status_broadcaster import (
+    DEFAULT_JOB_STATUS_UPDATE_CONFIG,
+    send_job_status_updates,
+    get_job_status_update_config,
+    JobStatusUpdateBroadcaster,
+    SendJobStatusUpdates,
+    Send_job_status_updates,
+    broadcast_job_status_update,
+    get_job_status_update_status,
+)
+
 

@@ -107,6 +107,22 @@ dispatchNamespace.on('connection', (socket) => {
   console.log(`[+] Client connected: ${socket.id} to tenant: ${tenantId}`);
   socket.join(tenantId);
   
+  // Security: Do NOT allow client messages to mutate job status.
+  // Authoritative updates are pushed from backend events only.
+  const rejectStatusMutation = (data, callback) => {
+    console.warn(`[Security] Client ${socket.id} attempted to mutate job status directly over WebSocket. Mutation rejected.`);
+    if (typeof callback === 'function') {
+      callback({
+        error: 'Direct client status mutation forbidden. Authoritative backend updates only.',
+        status: 'FORBIDDEN',
+      });
+    }
+  };
+
+  socket.on('job.status.update', rejectStatusMutation);
+  socket.on('update_job_status', rejectStatusMutation);
+  socket.on('job_status_update', rejectStatusMutation);
+
   socket.on('disconnect', () => {
     totalConnections--;
     const currentCount = ipConnectionCounts.get(ip) || 0;
@@ -149,6 +165,24 @@ redisSubscriber.on('message', (channel, message) => {
       messagesSent++;
       
       console.log(`Broadcasted [${event}] to tenant [${tenant_id}]`);
+
+      // If payload represents a status change and event was not already job.status.updated,
+      // also broadcast canonical job.status.updated event
+      if (event !== 'job.status.updated' && (payload.status || payload.new_status)) {
+        const canonicalStatus = String(payload.status || payload.new_status || '').toUpperCase();
+        const canonicalPayload = {
+          event: 'job.status.updated',
+          tenant_id: String(tenant_id),
+          job_id: String(payload.job_id || ''),
+          status: canonicalStatus,
+          old_status: payload.old_status,
+          timestamp: payload.timestamp,
+          correlation_id: payload.correlation_id,
+          event_id: payload.event_id,
+        };
+        dispatchNamespace.to(tenant_id).emit('job.status.updated', canonicalPayload);
+        messagesSent++;
+      }
       
     } catch (e) {
       console.error('Error parsing dispatch event from Redis:', e);
@@ -164,6 +198,64 @@ app.get('/bridge/status', (req, res) => {
     namespace: '/dispatch-dashboard',
   });
 });
+
+// Canonical Job Status Updates config endpoint
+app.get('/job-status/config', (req, res) => {
+  res.json({
+    event: 'job.status.updated',
+    transport: 'REDIS_PUB_SUB_TO_WEBSOCKET',
+    namespace: '/dispatch-dashboard',
+    source_of_truth: 'POSTGRESQL',
+  });
+});
+
+// Broadcast job status update directly via HTTP into the WebSocket server
+app.post('/job-status/broadcast', (req, res) => {
+  const payload = req.body;
+  if (!payload || typeof payload !== 'object') {
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+
+  const { job_id, status, tenant_id, event_id } = payload;
+  if (!job_id || !status || !tenant_id) {
+    return res.status(400).json({
+      error: 'job_id, status, and tenant_id are mandatory fields',
+    });
+  }
+
+  if (isDuplicateEvent(event_id)) {
+    return res.status(200).json({
+      event: 'job.status.updated',
+      tenant_id: String(tenant_id),
+      job_id: String(job_id),
+      status: String(status).toUpperCase(),
+      duplicate: true,
+      status_code: 'SKIPPED',
+    });
+  }
+
+  const canonicalPayload = {
+    event: 'job.status.updated',
+    tenant_id: String(tenant_id),
+    job_id: String(job_id),
+    status: String(status).toUpperCase(),
+    old_status: payload.old_status,
+    timestamp: payload.timestamp || new Date().toISOString(),
+    correlation_id: payload.correlation_id,
+    event_id: event_id,
+  };
+
+  dispatchNamespace.to(tenant_id).emit('job.status.updated', canonicalPayload);
+  messagesSent++;
+
+  return res.json({
+    event: 'job.status.updated',
+    tenant_id: String(tenant_id),
+    job_id: String(job_id),
+    status: String(status).toUpperCase(),
+  });
+});
+
 
 // Bridge Kafka event directly via HTTP into the WebSocket server
 app.post('/bridge/kafka-event', (req, res) => {
