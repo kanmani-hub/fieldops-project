@@ -68,3 +68,36 @@ export const sendTechnicianAvailabilityLocation = (
       },
     },
   );
+
+export interface TechnicianLocationUpdatePayload {
+  event: string;
+  tenant_id: string;
+  technician_id: string;
+  latitude: number;
+  longitude: number;
+  job_id?: string;
+  accuracy?: number | null;
+  altitude?: number | null;
+  speed?: number | null;
+  heading?: number | null;
+  timestamp?: string;
+}
+
+/**
+ * Helper to subscribe to real-time technician location updates on a Socket.IO connection.
+ */
+export const subscribeTechnicianLocationUpdates = (
+  socket: any,
+  callback: (event: TechnicianLocationUpdatePayload) => void
+): (() => void) => {
+  if (!socket) return () => {};
+  const handler = (payload: TechnicianLocationUpdatePayload) => {
+    callback(payload);
+  };
+  socket.on("technician.location.updated", handler);
+  socket.on("technician_location_updated", handler);
+  return () => {
+    socket.off("technician.location.updated", handler);
+    socket.off("technician_location_updated", handler);
+  };
+};

@@ -183,6 +183,29 @@ redisSubscriber.on('message', (channel, message) => {
         dispatchNamespace.to(tenant_id).emit('job.status.updated', canonicalPayload);
         messagesSent++;
       }
+
+      // If payload represents a location change and event was not already technician.location.updated,
+      // also broadcast canonical technician.location.updated event
+      if (event !== 'technician.location.updated' && (payload.latitude !== undefined && payload.longitude !== undefined)) {
+        const canonicalLocPayload = {
+          event: 'technician.location.updated',
+          tenant_id: String(tenant_id),
+          technician_id: String(payload.technician_id || ''),
+          latitude: Number(payload.latitude),
+          longitude: Number(payload.longitude),
+          job_id: payload.job_id ? String(payload.job_id) : undefined,
+          accuracy: payload.accuracy,
+          altitude: payload.altitude,
+          speed: payload.speed,
+          heading: payload.heading,
+          timestamp: payload.timestamp,
+          correlation_id: payload.correlation_id,
+          event_id: payload.event_id,
+        };
+        dispatchNamespace.to(tenant_id).emit('technician.location.updated', canonicalLocPayload);
+        messagesSent++;
+      }
+
       
     } catch (e) {
       console.error('Error parsing dispatch event from Redis:', e);
@@ -208,6 +231,69 @@ app.get('/job-status/config', (req, res) => {
     source_of_truth: 'POSTGRESQL',
   });
 });
+
+// Canonical Technician Location Updates config endpoint
+app.get('/technician-location/config', (req, res) => {
+  res.json({
+    event: 'technician.location.updated',
+    transport: 'REDIS_PUB_SUB_TO_WEBSOCKET',
+    namespace: '/dispatch-dashboard',
+    source_of_truth: 'POSTGRESQL',
+  });
+});
+
+// Broadcast technician location update directly via HTTP into the WebSocket server
+app.post('/technician-location/broadcast', (req, res) => {
+  const payload = req.body;
+  if (!payload || typeof payload !== 'object') {
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+
+  const { technician_id, tenant_id, latitude, longitude, event_id } = payload;
+  if (!technician_id || !tenant_id || latitude === undefined || longitude === undefined) {
+    return res.status(400).json({
+      error: 'technician_id, tenant_id, latitude, and longitude are mandatory fields',
+    });
+  }
+
+  if (isDuplicateEvent(event_id)) {
+    return res.status(200).json({
+      event: 'technician.location.updated',
+      tenant_id: String(tenant_id),
+      technician_id: String(technician_id),
+      latitude: Number(latitude),
+      longitude: Number(longitude),
+      duplicate: true,
+      status_code: 'SKIPPED',
+    });
+  }
+
+  const canonicalPayload = {
+    event: 'technician.location.updated',
+    tenant_id: String(tenant_id),
+    technician_id: String(technician_id),
+    latitude: Number(latitude),
+    longitude: Number(longitude),
+    job_id: payload.job_id ? String(payload.job_id) : undefined,
+    accuracy: payload.accuracy,
+    altitude: payload.altitude,
+    timestamp: payload.timestamp || new Date().toISOString(),
+    correlation_id: payload.correlation_id,
+    event_id: event_id,
+  };
+
+  dispatchNamespace.to(tenant_id).emit('technician.location.updated', canonicalPayload);
+  messagesSent++;
+
+  return res.json({
+    event: 'technician.location.updated',
+    tenant_id: String(tenant_id),
+    technician_id: String(technician_id),
+    latitude: Number(latitude),
+    longitude: Number(longitude),
+  });
+});
+
 
 // Broadcast job status update directly via HTTP into the WebSocket server
 app.post('/job-status/broadcast', (req, res) => {

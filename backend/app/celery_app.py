@@ -1530,4 +1530,21 @@ from app.services.job_status_broadcaster import (
 )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Technician Location Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.technician_location_broadcaster import (
+    DEFAULT_TECHNICIAN_LOCATION_CONFIG,
+    send_technician_location_updates,
+    get_technician_location_config,
+    TechnicianLocationBroadcaster,
+    SendTechnicianLocationUpdates,
+    Send_technician_location_updates,
+    broadcast_technician_location_update,
+    get_technician_location_status,
+)
+
+
+
 

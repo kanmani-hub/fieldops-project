@@ -4346,6 +4346,64 @@ SendJobStatusUpdatesTask = send_job_status_updates_task
 Send_job_status_updates_task = send_job_status_updates_task
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Technician Location Updates Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_technician_location_updates_task",
+)
+def send_technician_location_updates_task(
+    technician_id: Union[str, int] = "tech-1",
+    latitude: float = 0.0,
+    longitude: float = 0.0,
+    tenant_id: Union[str, int] = "tenant-1",
+    job_id: Optional[Union[str, int]] = None,
+    accuracy: Optional[float] = None,
+    altitude: Optional[float] = None,
+    speed: Optional[float] = None,
+    heading: Optional[float] = None,
+    timestamp: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    force_broadcast: bool = False,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative technician location update to WebSocket clients."""
+    from app.services.technician_location_broadcaster import send_technician_location_updates
+    return send_technician_location_updates(
+        technician_id=technician_id,
+        latitude=latitude,
+        longitude=longitude,
+        tenant_id=tenant_id,
+        job_id=job_id,
+        accuracy=accuracy,
+        altitude=altitude,
+        speed=speed,
+        heading=heading,
+        timestamp=timestamp,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        force_broadcast=force_broadcast,
+    )
+
+
+from app.services.technician_location_broadcaster import (
+    DEFAULT_TECHNICIAN_LOCATION_CONFIG,
+    send_technician_location_updates,
+    get_technician_location_config,
+    TechnicianLocationBroadcaster,
+    SendTechnicianLocationUpdates,
+    Send_technician_location_updates,
+    broadcast_technician_location_update,
+    get_technician_location_status,
+)
+
+SendTechnicianLocationUpdatesTask = send_technician_location_updates_task
+Send_technician_location_updates_task = send_technician_location_updates_task
+
+
+
 
 
 

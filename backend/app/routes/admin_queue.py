@@ -1966,6 +1966,82 @@ def post_send_job_status_update_endpoint(
     )
 
 
+# =============================================================================
+# WebSocket Real-Time Events: Send Technician Location Updates Endpoints
+# =============================================================================
+
+@router.get(
+    "/websocket/technician-location/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_technician_location_status_endpoint() -> dict:
+    """Return canonical output contract for Send technician location updates."""
+    from app.services.technician_location_broadcaster import send_technician_location_updates
+    return send_technician_location_updates()
+
+
+@router.get(
+    "/websocket/technician-location/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_technician_location_config_endpoint() -> dict:
+    """Return operational configuration for Technician Location Updates broadcast service."""
+    from app.services.technician_location_broadcaster import get_technician_location_config
+    return get_technician_location_config()
+
+
+@router.post(
+    "/websocket/technician-location/send",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_send_technician_location_update_endpoint(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Broadcast an authoritative technician GPS location update to the authenticated tenant room."""
+    from app.services.technician_location_broadcaster import send_technician_location_updates
+
+    technician_id = payload.get("technician_id", "tech-1")
+    latitude = payload.get("latitude", 0.0)
+    longitude = payload.get("longitude", 0.0)
+    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+
+    return send_technician_location_updates(
+        technician_id=technician_id,
+        latitude=latitude,
+        longitude=longitude,
+        tenant_id=tenant_id,
+        job_id=payload.get("job_id"),
+        accuracy=payload.get("accuracy"),
+        altitude=payload.get("altitude"),
+        speed=payload.get("speed"),
+        heading=payload.get("heading"),
+        timestamp=payload.get("timestamp"),
+        correlation_id=payload.get("correlation_id"),
+        event_id=payload.get("event_id"),
+        force_broadcast=payload.get("force_broadcast", False),
+    )
+
+
+
 
 
 
