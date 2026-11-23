@@ -122,6 +122,10 @@ dispatchNamespace.on('connection', (socket) => {
   socket.on('job.status.update', rejectStatusMutation);
   socket.on('update_job_status', rejectStatusMutation);
   socket.on('job_status_update', rejectStatusMutation);
+  socket.on('dispatch.update', rejectStatusMutation);
+  socket.on('override_assignment', rejectStatusMutation);
+  socket.on('mutate_dispatch', rejectStatusMutation);
+
 
   socket.on('disconnect', () => {
     totalConnections--;
@@ -206,6 +210,27 @@ redisSubscriber.on('message', (channel, message) => {
         messagesSent++;
       }
 
+      // If payload represents a dispatch update and event was not already dispatch.updated,
+      // also broadcast canonical dispatch.updated event
+      if (event !== 'dispatch.updated' && (payload.assignment_id || event === 'job_assigned' || event === 're-dispatch')) {
+        const canonicalDispatchPayload = {
+          event: 'dispatch.updated',
+          tenant_id: String(tenant_id),
+          job_id: String(payload.job_id || ''),
+          assignment_id: String(payload.assignment_id || payload.event_id || '456'),
+          technician_id: payload.technician_id,
+          technician_name: payload.technician_name,
+          dispatch_action: payload.dispatch_action || event,
+          status: payload.status || 'ASSIGNED',
+          timestamp: payload.timestamp,
+          correlation_id: payload.correlation_id,
+          event_id: payload.event_id,
+        };
+        dispatchNamespace.to(tenant_id).emit('dispatch.updated', canonicalDispatchPayload);
+        messagesSent++;
+      }
+
+
       
     } catch (e) {
       console.error('Error parsing dispatch event from Redis:', e);
@@ -241,6 +266,67 @@ app.get('/technician-location/config', (req, res) => {
     source_of_truth: 'POSTGRESQL',
   });
 });
+
+// Canonical Dispatch Updates config endpoint
+app.get('/dispatch/config', (req, res) => {
+  res.json({
+    event: 'dispatch.updated',
+    transport: 'REDIS_PUB_SUB_TO_WEBSOCKET',
+    namespace: '/dispatch-dashboard',
+    source_of_truth: 'POSTGRESQL',
+  });
+});
+
+// Broadcast dispatch update directly via HTTP into the WebSocket server
+app.post('/dispatch/broadcast', (req, res) => {
+  const payload = req.body;
+  if (!payload || typeof payload !== 'object') {
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+
+  const { job_id, assignment_id, tenant_id, event_id } = payload;
+  if (!job_id || !assignment_id || !tenant_id) {
+    return res.status(400).json({
+      error: 'job_id, assignment_id, and tenant_id are mandatory fields',
+    });
+  }
+
+  if (isDuplicateEvent(event_id)) {
+    return res.status(200).json({
+      event: 'dispatch.updated',
+      tenant_id: String(tenant_id),
+      job_id: String(job_id),
+      assignment_id: String(assignment_id),
+      duplicate: true,
+      status_code: 'SKIPPED',
+    });
+  }
+
+  const canonicalPayload = {
+    event: 'dispatch.updated',
+    tenant_id: String(tenant_id),
+    job_id: String(job_id),
+    assignment_id: String(assignment_id),
+    technician_id: payload.technician_id,
+    technician_name: payload.technician_name,
+    dispatch_action: payload.dispatch_action || 'ASSIGNED',
+    status: payload.status || 'ASSIGNED',
+    timestamp: payload.timestamp || new Date().toISOString(),
+    correlation_id: payload.correlation_id,
+    event_id: event_id,
+  };
+
+  dispatchNamespace.to(tenant_id).emit('dispatch.updated', canonicalPayload);
+  messagesSent++;
+
+  return res.json({
+    event: 'dispatch.updated',
+    tenant_id: String(tenant_id),
+    job_id: String(job_id),
+    assignment_id: String(assignment_id),
+  });
+});
+
 
 // Broadcast technician location update directly via HTTP into the WebSocket server
 app.post('/technician-location/broadcast', (req, res) => {

@@ -4403,6 +4403,62 @@ SendTechnicianLocationUpdatesTask = send_technician_location_updates_task
 Send_technician_location_updates_task = send_technician_location_updates_task
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Dispatch Updates Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_dispatch_updates_task",
+)
+def send_dispatch_updates_task(
+    job_id: Union[str, int] = "123",
+    assignment_id: Union[str, int] = "456",
+    tenant_id: Union[str, int] = "tenant-1",
+    technician_id: Optional[Union[str, int]] = None,
+    technician_name: Optional[str] = None,
+    previous_technician_id: Optional[Union[str, int]] = None,
+    dispatch_action: str = "ASSIGNED",
+    status: str = "ASSIGNED",
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    schema_version: int = 1,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative dispatch update to WebSocket clients."""
+    from app.services.dispatch_update_broadcaster import send_dispatch_updates
+    return send_dispatch_updates(
+        job_id=job_id,
+        assignment_id=assignment_id,
+        tenant_id=tenant_id,
+        technician_id=technician_id,
+        technician_name=technician_name,
+        previous_technician_id=previous_technician_id,
+        dispatch_action=dispatch_action,
+        status=status,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        timestamp=timestamp,
+        schema_version=schema_version,
+    )
+
+
+from app.services.dispatch_update_broadcaster import (
+    DEFAULT_DISPATCH_UPDATE_CONFIG,
+    send_dispatch_updates,
+    get_dispatch_update_config,
+    DispatchUpdateBroadcaster,
+    SendDispatchUpdates,
+    Send_dispatch_updates,
+    broadcast_dispatch_update,
+    get_dispatch_update_status,
+)
+
+SendDispatchUpdatesTask = send_dispatch_updates_task
+Send_dispatch_updates_task = send_dispatch_updates_task
+
+
+
 
 
 

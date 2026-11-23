@@ -2422,6 +2422,23 @@ from app.services.technician_location_broadcaster import (
 )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Dispatch Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.dispatch_update_broadcaster import (
+    DEFAULT_DISPATCH_UPDATE_CONFIG,
+    send_dispatch_updates,
+    get_dispatch_update_config,
+    DispatchUpdateBroadcaster,
+    SendDispatchUpdates,
+    Send_dispatch_updates,
+    broadcast_dispatch_update,
+    get_dispatch_update_status,
+)
+
+
+
 
 
 

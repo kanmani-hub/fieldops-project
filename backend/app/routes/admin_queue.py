@@ -2041,6 +2041,79 @@ def post_send_technician_location_update_endpoint(
     )
 
 
+# =============================================================================
+# WebSocket Real-Time Events: Send Dispatch Updates Endpoints
+# =============================================================================
+
+@router.get(
+    "/websocket/dispatch/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_dispatch_update_status_endpoint() -> dict:
+    """Return canonical output contract for Send dispatch updates."""
+    from app.services.dispatch_update_broadcaster import send_dispatch_updates
+    return send_dispatch_updates()
+
+
+@router.get(
+    "/websocket/dispatch/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_dispatch_update_config_endpoint() -> dict:
+    """Return operational configuration for Dispatch Updates broadcast service."""
+    from app.services.dispatch_update_broadcaster import get_dispatch_update_config
+    return get_dispatch_update_config()
+
+
+@router.post(
+    "/websocket/dispatch/send",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_send_dispatch_update_endpoint(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Broadcast an authoritative dispatch update to the authenticated tenant room."""
+    from app.services.dispatch_update_broadcaster import send_dispatch_updates
+
+    job_id = payload.get("job_id", "123")
+    assignment_id = payload.get("assignment_id", "456")
+    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+
+    return send_dispatch_updates(
+        job_id=job_id,
+        assignment_id=assignment_id,
+        tenant_id=tenant_id,
+        technician_id=payload.get("technician_id"),
+        technician_name=payload.get("technician_name"),
+        previous_technician_id=payload.get("previous_technician_id"),
+        dispatch_action=payload.get("dispatch_action", "ASSIGNED"),
+        status=payload.get("status", "ASSIGNED"),
+        correlation_id=payload.get("correlation_id"),
+        event_id=payload.get("event_id"),
+        timestamp=payload.get("timestamp"),
+    )
+
+
+
 
 
 

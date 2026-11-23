@@ -66,6 +66,40 @@ export interface JobStatusUpdatePayload {
   event_id?: string;
 }
 
+export interface DispatchUpdatePayload {
+  event: string;
+  tenant_id: string;
+  job_id: string;
+  assignment_id: string;
+  technician_id?: string;
+  technician_name?: string;
+  previous_technician_id?: string;
+  dispatch_action?: string;
+  status?: string;
+  timestamp?: string;
+  correlation_id?: string;
+  event_id?: string;
+}
+
+/**
+ * Helper to subscribe to real-time dispatch updates on a Socket.IO connection.
+ */
+export const subscribeDispatchUpdates = (
+  socket: any,
+  callback: (event: DispatchUpdatePayload) => void
+): (() => void) => {
+  if (!socket) return () => {};
+  const handler = (payload: DispatchUpdatePayload) => {
+    callback(payload);
+  };
+  socket.on("dispatch.updated", handler);
+  socket.on("job_assigned", handler);
+  return () => {
+    socket.off("dispatch.updated", handler);
+    socket.off("job_assigned", handler);
+  };
+};
+
 /**
  * Helper to subscribe to real-time job status updates on a Socket.IO connection.
  */
@@ -86,8 +120,10 @@ export const subscribeJobStatusUpdates = (
 const dispatcherService = {
   getDispatchers,
   provisionTechnician,
+  subscribeDispatchUpdates,
   subscribeJobStatusUpdates,
 };
+
 
 export default dispatcherService;
 
