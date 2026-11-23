@@ -107,7 +107,28 @@ dispatchNamespace.on('connection', (socket) => {
   console.log(`[+] Client connected: ${socket.id} to tenant: ${tenantId}`);
   socket.join(tenantId);
   
+  // Connection-State Recovery: Notify client of recovery status
+  if (socket.recovered) {
+    console.log(`[+] Client recovered connection state: ${socket.id} for tenant: ${tenantId}`);
+    socket.emit('recovery.status', {
+      status: 'RECOVERED',
+      namespace: '/dispatch-dashboard',
+      recovery_window_seconds: 120,
+      recovered: true,
+      tenant_id: tenantId,
+    });
+  } else {
+    socket.emit('recovery.status', {
+      status: 'INITIALIZED',
+      namespace: '/dispatch-dashboard',
+      recovery_window_seconds: 120,
+      recovered: false,
+      tenant_id: tenantId,
+    });
+  }
+
   // Security: Do NOT allow client messages to mutate job status.
+
   // Authoritative updates are pushed from backend events only.
   const rejectStatusMutation = (data, callback) => {
     console.warn(`[Security] Client ${socket.id} attempted to mutate job status directly over WebSocket. Mutation rejected.`);
@@ -393,6 +414,59 @@ app.get('/payments/config', (req, res) => {
     valid_statuses: ['AUTHORIZED', 'CANCELLED', 'FAILED', 'PAID', 'PARTIALLY_REFUNDED', 'PENDING', 'PROCESSING', 'REFUNDED', 'SUCCESSFUL', 'UNAVAILABLE'],
   });
 });
+
+// Canonical Reconnect & Connection-State Recovery status endpoint
+app.get('/reconnect/status', (req, res) => {
+  res.json({
+    status: 'RECOVERED',
+    namespace: '/dispatch-dashboard',
+    recovery_window_seconds: 120,
+  });
+});
+
+// Canonical Reconnect & Connection-State Recovery config endpoint
+app.get('/reconnect/config', (req, res) => {
+  res.json({
+    status: 'RECOVERED',
+    namespace: '/dispatch-dashboard',
+    recovery_window_seconds: 120,
+    max_disconnection_duration_ms: 120000,
+    skip_middlewares: true,
+    transport: 'SOCKET_IO_CONNECTION_STATE_RECOVERY',
+    client_reconnection_options: {
+      reconnection: true,
+      reconnection_attempts: 10,
+      reconnection_delay_ms: 1000,
+      reconnection_delay_max_ms: 10000,
+      timeout_ms: 10000,
+    },
+  });
+});
+
+// Reconnection sync evaluation endpoint
+app.post('/reconnect/sync', (req, res) => {
+  const { tenant_id, recovered, disconnected_at, recovery_window_seconds } = req.body || {};
+  if (!tenant_id) {
+    return res.status(400).json({ error: 'tenant_id is mandatory' });
+  }
+
+  const windowSeconds = Number(recovery_window_seconds || 120);
+  let isRecovered = recovered !== undefined ? Boolean(recovered) : true;
+
+  if (disconnected_at) {
+    const elapsed = (Date.now() - Number(disconnected_at)) / 1000;
+    if (elapsed > windowSeconds) {
+      isRecovered = false;
+    }
+  }
+
+  res.json({
+    status: isRecovered ? 'RECOVERED' : 'SYNC_REQUIRED',
+    namespace: '/dispatch-dashboard',
+    recovery_window_seconds: windowSeconds,
+  });
+});
+
 
 // Broadcast payment update directly via HTTP into the WebSocket server
 app.post('/payments/broadcast', (req, res) => {

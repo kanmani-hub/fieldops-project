@@ -130,6 +130,24 @@ export interface PaymentUpdatePayload {
   event_id?: string;
 }
 
+export interface ReconnectionConfig {
+  status: "RECOVERED" | "INITIALIZED" | "SYNC_REQUIRED" | string;
+  namespace: string;
+  recovery_window_seconds: number;
+  recovered?: boolean;
+  tenant_id?: string;
+}
+
+export const DEFAULT_SOCKET_RECONNECT_OPTIONS = {
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 10000,
+  timeout: 10000,
+  transports: ["websocket", "polling"],
+};
+
+
 
 
 
@@ -230,6 +248,49 @@ export const subscribePaymentUpdates = (
   };
 };
 
+/**
+ * Helper to handle WebSocket connection-state recovery and trigger backend state refresh
+ * when the recovery window has elapsed or recovery is incomplete.
+ */
+export const subscribeReconnectionRecovery = (
+  socket: any,
+  onRecovered?: (config: ReconnectionConfig) => void,
+  onSyncRequired?: () => void
+): (() => void) => {
+  if (!socket) return () => {};
+
+  const recoveryHandler = (config: ReconnectionConfig) => {
+    if (config.recovered) {
+      if (onRecovered) onRecovered(config);
+    } else {
+      if (onSyncRequired) onSyncRequired();
+    }
+  };
+
+  const connectHandler = () => {
+    if (socket.recovered) {
+      if (onRecovered) {
+        onRecovered({
+          status: "RECOVERED",
+          namespace: "/dispatch-dashboard",
+          recovery_window_seconds: 120,
+          recovered: true,
+        });
+      }
+    } else {
+      if (onSyncRequired) onSyncRequired();
+    }
+  };
+
+  socket.on("recovery.status", recoveryHandler);
+  socket.on("connect", connectHandler);
+
+  return () => {
+    socket.off("recovery.status", recoveryHandler);
+    socket.off("connect", connectHandler);
+  };
+};
+
 const dispatcherService = {
   getDispatchers,
   provisionTechnician,
@@ -238,7 +299,10 @@ const dispatcherService = {
   subscribeSLAAlerts,
   subscribeNotificationUpdates,
   subscribePaymentUpdates,
+  subscribeReconnectionRecovery,
+  DEFAULT_SOCKET_RECONNECT_OPTIONS,
 };
+
 
 
 

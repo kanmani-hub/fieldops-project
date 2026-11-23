@@ -4636,6 +4636,54 @@ SendPaymentUpdatesTask = send_payment_updates_task
 Send_payment_updates_task = send_payment_updates_task
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Handle WebSocket Reconnection Celery Task
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.handle_websocket_reconnection_task",
+)
+def handle_websocket_reconnection_task(
+    tenant_id: Union[str, int] = "tenant-1",
+    socket_id: Optional[str] = None,
+    last_event_id: Optional[str] = None,
+    recovered: bool = True,
+    disconnected_at: Optional[float] = None,
+    status: Optional[str] = None,
+    namespace: Optional[str] = None,
+    recovery_window_seconds: Optional[int] = None,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to evaluate and process WebSocket client reconnection/recovery."""
+    from app.services.websocket_reconnection_service import handle_websocket_reconnection
+    return handle_websocket_reconnection(
+        tenant_id=tenant_id,
+        socket_id=socket_id,
+        last_event_id=last_event_id,
+        recovered=recovered,
+        disconnected_at=disconnected_at,
+        status=status,
+        namespace=namespace,
+        recovery_window_seconds=recovery_window_seconds,
+    )
+
+
+from app.services.websocket_reconnection_service import (
+    DEFAULT_RECONNECTION_CONFIG,
+    RECOVERY_WINDOW_SECONDS,
+    handle_websocket_reconnection,
+    get_reconnection_config,
+    get_reconnection_status,
+    WebSocketReconnectionService,
+    HandleWebSocketReconnection,
+    Handle_websocket_reconnection,
+)
+
+HandleWebSocketReconnectionTask = handle_websocket_reconnection_task
+Handle_websocket_reconnection_task = handle_websocket_reconnection_task
+
+
+
 
 
 

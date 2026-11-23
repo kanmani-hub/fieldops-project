@@ -2343,6 +2343,74 @@ def post_send_payment_update_endpoint(
     )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Handle WebSocket Reconnection Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/websocket/reconnect/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_reconnect_status_endpoint() -> dict:
+    """Return operational status and recovery window for WebSocket client reconnection."""
+    from app.services.websocket_reconnection_service import handle_websocket_reconnection
+    return handle_websocket_reconnection()
+
+
+@router.get(
+    "/websocket/reconnect/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_reconnect_config_endpoint() -> dict:
+    """Return configuration contract for WebSocket connection-state recovery."""
+    from app.services.websocket_reconnection_service import get_reconnection_config
+    return get_reconnection_config()
+
+
+@router.post(
+    "/websocket/reconnect/sync",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_websocket_reconnect_sync_endpoint(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Evaluate client reconnection and state recovery status."""
+    from app.services.websocket_reconnection_service import handle_websocket_reconnection
+
+    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+
+    return handle_websocket_reconnection(
+        tenant_id=tenant_id,
+        socket_id=payload.get("socket_id"),
+        last_event_id=payload.get("last_event_id"),
+        recovered=payload.get("recovered", True),
+        disconnected_at=payload.get("disconnected_at"),
+        status=payload.get("status"),
+        namespace=payload.get("namespace"),
+        recovery_window_seconds=payload.get("recovery_window_seconds"),
+    )
+
+
+
 
 
 

@@ -2124,6 +2124,14 @@ const fetchCompletedCount = async () => {
     const onConnect = () => {
       setDispatchSocketStatus("connected");
       setDispatchSocketError("");
+      if (socket.recovered) {
+        console.log("[WebSocket Recovery] State recovered successfully from connectionStateRecovery.");
+      } else {
+        console.log("[WebSocket Recovery] Non-recovered session or window elapsed; refreshing planning state.");
+        if (typeof fetchPlanningData === "function") {
+          fetchPlanningData();
+        }
+      }
     };
 
     const onDisconnect = (reason?: string) => {

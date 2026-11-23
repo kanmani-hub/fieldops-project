@@ -2489,6 +2489,23 @@ from app.services.payment_update_broadcaster import (
 )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Handle Reconnection Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_reconnection_service import (
+    DEFAULT_RECONNECTION_CONFIG,
+    RECOVERY_WINDOW_SECONDS,
+    handle_websocket_reconnection,
+    get_reconnection_config,
+    get_reconnection_status,
+    WebSocketReconnectionService,
+    HandleWebSocketReconnection,
+    Handle_websocket_reconnection,
+)
+
+
+
 
 
 
