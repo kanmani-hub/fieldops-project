@@ -2438,6 +2438,24 @@ from app.services.dispatch_update_broadcaster import (
 )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send SLA Alerts Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.sla_alert_broadcaster import (
+    DEFAULT_SLA_ALERT_CONFIG,
+    VALID_SEVERITIES,
+    send_sla_alerts,
+    get_sla_alert_config,
+    SLAAlertBroadcaster,
+    SendSLAAlerts,
+    Send_sla_alerts,
+    broadcast_sla_alert,
+    get_sla_alert_status,
+)
+
+
+
 
 
 

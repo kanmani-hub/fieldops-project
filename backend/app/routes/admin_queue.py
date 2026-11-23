@@ -2113,6 +2113,82 @@ def post_send_dispatch_update_endpoint(
     )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send SLA Alerts Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/websocket/sla-alerts/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_sla_alerts_status_endpoint() -> dict:
+    """Return operational status for SLA alert WebSocket real-time delivery."""
+    from app.services.sla_alert_broadcaster import get_sla_alert_config
+    return {
+        "status": "READY",
+        **get_sla_alert_config(),
+    }
+
+
+@router.get(
+    "/websocket/sla-alerts/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_sla_alerts_config_endpoint() -> dict:
+    """Return configuration contract for SLA alert broadcasts."""
+    from app.services.sla_alert_broadcaster import get_sla_alert_config
+    return get_sla_alert_config()
+
+
+@router.post(
+    "/websocket/sla-alerts/send",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_send_sla_alert_endpoint(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Broadcast an authoritative SLA alert to the authenticated tenant room."""
+    from app.services.sla_alert_broadcaster import send_sla_alerts
+
+    job_id = payload.get("job_id", "123")
+    severity = payload.get("severity", "AT_RISK")
+    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+
+    return send_sla_alerts(
+        job_id=job_id,
+        severity=severity,
+        tenant_id=tenant_id,
+        sla_type=payload.get("sla_type", "RESPONSE"),
+        time_remaining_seconds=payload.get("time_remaining_seconds"),
+        target_time=payload.get("target_time"),
+        deadline=payload.get("deadline"),
+        customer_tier=payload.get("customer_tier", "STANDARD"),
+        correlation_id=payload.get("correlation_id"),
+        event_id=payload.get("event_id"),
+        timestamp=payload.get("timestamp"),
+    )
+
+
+
 
 
 

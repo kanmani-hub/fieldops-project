@@ -139,23 +139,23 @@ dispatchNamespace.on('connection', (socket) => {
   });
 });
 
-redisSubscriber.subscribe('dispatch_events', (err, count) => {
+redisSubscriber.subscribe('dispatch_events', 'sla_events', (err, count) => {
   if (err) {
-    console.error('Failed to subscribe to Redis dispatch_events channel:', err);
+    console.error('Failed to subscribe to Redis channels:', err);
   } else {
-    console.log(`Subscribed to Redis dispatch_events. Currently subscribed to ${count} channels.`);
+    console.log(`Subscribed to Redis channels. Currently subscribed to ${count} channels.`);
   }
 });
 
 redisSubscriber.on('message', (channel, message) => {
-  if (channel === 'dispatch_events') {
+  if (channel === 'dispatch_events' || channel === 'sla_events') {
     try {
       const payload = JSON.parse(message);
       
       const { event, tenant_id, event_id } = payload;
       
       if (!event || !tenant_id) {
-        console.warn('Received malformed dispatch event', payload);
+        console.warn('Received malformed event', payload);
         return;
       }
       
@@ -230,7 +230,38 @@ redisSubscriber.on('message', (channel, message) => {
         messagesSent++;
       }
 
-
+      // If payload represents an SLA alert and event was not already sla.alert,
+      // also broadcast canonical sla.alert event
+      if (
+        event !== 'sla.alert' &&
+        (payload.severity ||
+         String(event).toLowerCase().includes('sla') ||
+         String(event).toLowerCase().includes('breach'))
+      ) {
+        const canonicalSeverity = String(
+          payload.severity ||
+          (String(event).toLowerCase().includes('breached') ? 'BREACHED' : 'AT_RISK')
+        ).toUpperCase();
+        const canonicalSLAPayload = {
+          event: 'sla.alert',
+          tenant_id: String(tenant_id),
+          job_id: String(payload.job_id || ''),
+          severity: canonicalSeverity,
+          sla_type: payload.sla_type || 'RESPONSE',
+          time_remaining_seconds: payload.time_remaining_seconds !== undefined
+            ? Number(payload.time_remaining_seconds)
+            : (payload.payload && payload.payload.remaining_seconds !== undefined
+                ? Number(payload.payload.remaining_seconds)
+                : undefined),
+          target_time: payload.target_time || payload.deadline || (payload.payload && (payload.payload.sla_deadline || payload.payload.target_time)),
+          customer_tier: payload.customer_tier || 'STANDARD',
+          timestamp: payload.timestamp || new Date().toISOString(),
+          correlation_id: payload.correlation_id,
+          event_id: payload.event_id,
+        };
+        dispatchNamespace.to(tenant_id).emit('sla.alert', canonicalSLAPayload);
+        messagesSent++;
+      }
       
     } catch (e) {
       console.error('Error parsing dispatch event from Redis:', e);
@@ -276,6 +307,70 @@ app.get('/dispatch/config', (req, res) => {
     source_of_truth: 'POSTGRESQL',
   });
 });
+
+// Canonical SLA Alerts config endpoint
+app.get('/sla-alerts/config', (req, res) => {
+  res.json({
+    event: 'sla.alert',
+    transport: 'REDIS_PUB_SUB_TO_WEBSOCKET',
+    namespace: '/dispatch-dashboard',
+    source_of_truth: 'POSTGRESQL',
+    valid_severities: ['AT_RISK', 'BREACHED', 'CRITICAL', 'INFO', 'RESOLVED', 'WARNING'],
+  });
+});
+
+// Broadcast SLA alert directly via HTTP into the WebSocket server
+app.post('/sla-alerts/broadcast', (req, res) => {
+  const payload = req.body;
+  if (!payload || typeof payload !== 'object') {
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+
+  const { job_id, severity, tenant_id, event_id } = payload;
+  if (!job_id || !tenant_id) {
+    return res.status(400).json({
+      error: 'job_id and tenant_id are mandatory fields',
+    });
+  }
+
+  const normSeverity = String(severity || 'AT_RISK').toUpperCase();
+
+  if (isDuplicateEvent(event_id)) {
+    return res.status(200).json({
+      event: 'sla.alert',
+      tenant_id: String(tenant_id),
+      job_id: String(job_id),
+      severity: normSeverity,
+      duplicate: true,
+      status_code: 'SKIPPED',
+    });
+  }
+
+  const canonicalPayload = {
+    event: 'sla.alert',
+    tenant_id: String(tenant_id),
+    job_id: String(job_id),
+    severity: normSeverity,
+    sla_type: payload.sla_type || 'RESPONSE',
+    time_remaining_seconds: payload.time_remaining_seconds,
+    target_time: payload.target_time || payload.deadline,
+    customer_tier: payload.customer_tier || 'STANDARD',
+    timestamp: payload.timestamp || new Date().toISOString(),
+    correlation_id: payload.correlation_id,
+    event_id: event_id,
+  };
+
+  dispatchNamespace.to(tenant_id).emit('sla.alert', canonicalPayload);
+  messagesSent++;
+
+  return res.json({
+    event: 'sla.alert',
+    tenant_id: String(tenant_id),
+    job_id: String(job_id),
+    severity: normSeverity,
+  });
+});
+
 
 // Broadcast dispatch update directly via HTTP into the WebSocket server
 app.post('/dispatch/broadcast', (req, res) => {

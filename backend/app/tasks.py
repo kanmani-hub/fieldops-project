@@ -4458,6 +4458,63 @@ SendDispatchUpdatesTask = send_dispatch_updates_task
 Send_dispatch_updates_task = send_dispatch_updates_task
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send SLA Alerts Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_sla_alerts_task",
+)
+def send_sla_alerts_task(
+    job_id: Union[str, int] = "123",
+    severity: str = "AT_RISK",
+    tenant_id: Union[str, int] = "tenant-1",
+    sla_type: str = "RESPONSE",
+    time_remaining_seconds: Optional[Union[int, float]] = None,
+    target_time: Optional[str] = None,
+    deadline: Optional[str] = None,
+    customer_tier: str = "STANDARD",
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    schema_version: int = 1,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative SLA alerts to WebSocket clients."""
+    from app.services.sla_alert_broadcaster import send_sla_alerts
+    return send_sla_alerts(
+        job_id=job_id,
+        severity=severity,
+        tenant_id=tenant_id,
+        sla_type=sla_type,
+        time_remaining_seconds=time_remaining_seconds,
+        target_time=target_time,
+        deadline=deadline,
+        customer_tier=customer_tier,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        timestamp=timestamp,
+        schema_version=schema_version,
+    )
+
+
+from app.services.sla_alert_broadcaster import (
+    DEFAULT_SLA_ALERT_CONFIG,
+    VALID_SEVERITIES,
+    send_sla_alerts,
+    get_sla_alert_config,
+    SLAAlertBroadcaster,
+    SendSLAAlerts,
+    Send_sla_alerts,
+    broadcast_sla_alert,
+    get_sla_alert_status,
+)
+
+SendSLAAlertsTask = send_sla_alerts_task
+Send_sla_alerts_task = send_sla_alerts_task
+
+
+
 
 
 

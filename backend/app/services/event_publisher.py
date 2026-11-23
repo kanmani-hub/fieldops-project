@@ -555,6 +555,36 @@ def publish_sla_event(
             e,
         )
 
+    # Trigger canonical SLA alert broadcast for WebSocket real-time consumers
+    try:
+        sev = "BREACHED" if "breach" in event_type.lower() and "warning" not in event_type.lower() and "near" not in event_type.lower() else "AT_RISK"
+        if payload and isinstance(payload, dict) and payload.get("severity"):
+            sev = str(payload.get("severity")).upper()
+        
+        rem_sec = None
+        target_t = None
+        c_tier = "STANDARD"
+        if payload and isinstance(payload, dict):
+            rem_sec = payload.get("remaining_seconds") or payload.get("time_remaining_seconds")
+            target_t = payload.get("sla_deadline") or payload.get("target_time") or payload.get("deadline")
+            c_tier = payload.get("customer_tier", "STANDARD")
+
+        send_sla_alerts(
+            job_id=job_id,
+            severity=sev,
+            tenant_id=tenant_id,
+            time_remaining_seconds=rem_sec,
+            target_time=target_t,
+            customer_tier=c_tier,
+            correlation_id=correlation_id,
+            event_id=event_id,
+            timestamp=timestamp,
+            redis_client=redis_client,
+        )
+    except Exception as alert_err:
+        logger.warning("Failed secondary broadcast of SLA alert: %s", alert_err)
+
+
 
 def publish_analytics_event(
     redis_client,
@@ -690,6 +720,24 @@ from app.services.dispatch_update_broadcaster import (
     broadcast_dispatch_update,
     get_dispatch_update_status,
 )
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send SLA Alerts Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.sla_alert_broadcaster import (
+    DEFAULT_SLA_ALERT_CONFIG,
+    VALID_SEVERITIES,
+    send_sla_alerts,
+    get_sla_alert_config,
+    SLAAlertBroadcaster,
+    SendSLAAlerts,
+    Send_sla_alerts,
+    broadcast_sla_alert,
+    get_sla_alert_status,
+)
+
 
 
 

@@ -81,6 +81,22 @@ export interface DispatchUpdatePayload {
   event_id?: string;
 }
 
+export interface SLAAlertPayload {
+  event: string;
+  tenant_id: string;
+  job_id: string;
+  severity: "AT_RISK" | "BREACHED" | "WARNING" | "CRITICAL" | "INFO" | "RESOLVED" | string;
+  sla_type?: string;
+  time_remaining_seconds?: number;
+  target_time?: string;
+  deadline?: string;
+  customer_tier?: string;
+  timestamp?: string;
+  correlation_id?: string;
+  event_id?: string;
+}
+
+
 /**
  * Helper to subscribe to real-time dispatch updates on a Socket.IO connection.
  */
@@ -117,12 +133,35 @@ export const subscribeJobStatusUpdates = (
   };
 };
 
+/**
+ * Helper to subscribe to real-time SLA alerts on a Socket.IO connection.
+ */
+export const subscribeSLAAlerts = (
+  socket: any,
+  callback: (event: SLAAlertPayload) => void
+): (() => void) => {
+  if (!socket) return () => {};
+  const handler = (payload: SLAAlertPayload) => {
+    callback(payload);
+  };
+  socket.on("sla.alert", handler);
+  socket.on("sla_breached", handler);
+  socket.on("sla_breach_warning", handler);
+  return () => {
+    socket.off("sla.alert", handler);
+    socket.off("sla_breached", handler);
+    socket.off("sla_breach_warning", handler);
+  };
+};
+
 const dispatcherService = {
   getDispatchers,
   provisionTechnician,
   subscribeDispatchUpdates,
   subscribeJobStatusUpdates,
+  subscribeSLAAlerts,
 };
+
 
 
 export default dispatcherService;
