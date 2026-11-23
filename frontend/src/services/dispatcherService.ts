@@ -96,6 +96,23 @@ export interface SLAAlertPayload {
   event_id?: string;
 }
 
+export interface NotificationUpdatePayload {
+  event: string;
+  tenant_id: string;
+  notification_id: string;
+  status: "QUEUED" | "SENT" | "FAILED" | "RETRIED" | "DELIVERED" | "PENDING" | "READ" | string;
+  channel?: string;
+  recipient_id?: string;
+  recipient_masked?: string;
+  attempt?: number;
+  job_id?: string;
+  error_reason?: string;
+  timestamp?: string;
+  correlation_id?: string;
+  event_id?: string;
+}
+
+
 
 /**
  * Helper to subscribe to real-time dispatch updates on a Socket.IO connection.
@@ -154,13 +171,32 @@ export const subscribeSLAAlerts = (
   };
 };
 
+/**
+ * Helper to subscribe to real-time notification lifecycle updates on a Socket.IO connection.
+ */
+export const subscribeNotificationUpdates = (
+  socket: any,
+  callback: (event: NotificationUpdatePayload) => void
+): (() => void) => {
+  if (!socket) return () => {};
+  const handler = (payload: NotificationUpdatePayload) => {
+    callback(payload);
+  };
+  socket.on("notification.updated", handler);
+  return () => {
+    socket.off("notification.updated", handler);
+  };
+};
+
 const dispatcherService = {
   getDispatchers,
   provisionTechnician,
   subscribeDispatchUpdates,
   subscribeJobStatusUpdates,
   subscribeSLAAlerts,
+  subscribeNotificationUpdates,
 };
+
 
 
 

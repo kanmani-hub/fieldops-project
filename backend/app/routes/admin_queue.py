@@ -2188,6 +2188,84 @@ def post_send_sla_alert_endpoint(
     )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Notification Updates Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/websocket/notifications/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_notification_updates_status_endpoint() -> dict:
+    """Return operational status for notification updates WebSocket real-time delivery."""
+    from app.services.notification_update_broadcaster import get_notification_update_config
+    return {
+        "status": "READY",
+        **get_notification_update_config(),
+    }
+
+
+@router.get(
+    "/websocket/notifications/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_notification_updates_config_endpoint() -> dict:
+    """Return configuration contract for notification updates broadcasts."""
+    from app.services.notification_update_broadcaster import get_notification_update_config
+    return get_notification_update_config()
+
+
+@router.post(
+    "/websocket/notifications/send",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_send_notification_update_endpoint(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Broadcast an authoritative notification lifecycle update to the authenticated tenant room."""
+    from app.services.notification_update_broadcaster import send_notification_updates
+
+    notification_id = payload.get("notification_id", "n-1")
+    status = payload.get("status", "SENT")
+    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+
+    return send_notification_updates(
+        notification_id=notification_id,
+        status=status,
+        tenant_id=tenant_id,
+        channel=payload.get("channel", "EMAIL"),
+        recipient=payload.get("recipient"),
+        recipient_id=payload.get("recipient_id"),
+        attempt=payload.get("attempt", 1),
+        job_id=payload.get("job_id"),
+        error_reason=payload.get("error_reason"),
+        provider_id=payload.get("provider_id"),
+        correlation_id=payload.get("correlation_id"),
+        event_id=payload.get("event_id"),
+        timestamp=payload.get("timestamp"),
+    )
+
+
+
 
 
 

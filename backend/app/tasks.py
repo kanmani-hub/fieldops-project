@@ -4514,6 +4514,67 @@ SendSLAAlertsTask = send_sla_alerts_task
 Send_sla_alerts_task = send_sla_alerts_task
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Notification Updates Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_notification_updates_task",
+)
+def send_notification_updates_task(
+    notification_id: Union[str, int] = "n-1",
+    status: str = "SENT",
+    tenant_id: Union[str, int] = "tenant-1",
+    channel: Optional[str] = "EMAIL",
+    recipient: Optional[str] = None,
+    recipient_id: Optional[Union[str, int]] = None,
+    attempt: int = 1,
+    job_id: Optional[Union[str, int]] = None,
+    error_reason: Optional[str] = None,
+    provider_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    schema_version: int = 1,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative notification lifecycle update to WebSocket clients."""
+    from app.services.notification_update_broadcaster import send_notification_updates
+    return send_notification_updates(
+        notification_id=notification_id,
+        status=status,
+        tenant_id=tenant_id,
+        channel=channel,
+        recipient=recipient,
+        recipient_id=recipient_id,
+        attempt=attempt,
+        job_id=job_id,
+        error_reason=error_reason,
+        provider_id=provider_id,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        timestamp=timestamp,
+        schema_version=schema_version,
+    )
+
+
+from app.services.notification_update_broadcaster import (
+    DEFAULT_NOTIFICATION_UPDATE_CONFIG,
+    VALID_NOTIFICATION_STATUSES,
+    send_notification_updates,
+    get_notification_update_config,
+    NotificationUpdateBroadcaster,
+    SendNotificationUpdates,
+    Send_notification_updates,
+    broadcast_notification_update,
+    get_notification_update_status,
+)
+
+SendNotificationUpdatesTask = send_notification_updates_task
+Send_notification_updates_task = send_notification_updates_task
+
+
+
 
 
 

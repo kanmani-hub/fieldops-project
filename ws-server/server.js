@@ -139,7 +139,7 @@ dispatchNamespace.on('connection', (socket) => {
   });
 });
 
-redisSubscriber.subscribe('dispatch_events', 'sla_events', (err, count) => {
+redisSubscriber.subscribe('dispatch_events', 'sla_events', 'notification_events', (err, count) => {
   if (err) {
     console.error('Failed to subscribe to Redis channels:', err);
   } else {
@@ -148,7 +148,7 @@ redisSubscriber.subscribe('dispatch_events', 'sla_events', (err, count) => {
 });
 
 redisSubscriber.on('message', (channel, message) => {
-  if (channel === 'dispatch_events' || channel === 'sla_events') {
+  if (channel === 'dispatch_events' || channel === 'sla_events' || channel === 'notification_events') {
     try {
       const payload = JSON.parse(message);
       
@@ -262,6 +262,32 @@ redisSubscriber.on('message', (channel, message) => {
         dispatchNamespace.to(tenant_id).emit('sla.alert', canonicalSLAPayload);
         messagesSent++;
       }
+
+      // If payload represents a notification update and event was not already notification.updated,
+      // also broadcast canonical notification.updated event
+      if (
+        event !== 'notification.updated' &&
+        (payload.notification_id || String(event).toLowerCase().includes('notification'))
+      ) {
+        const canonicalStatus = String(payload.status || 'SENT').toUpperCase();
+        const canonicalNotificationPayload = {
+          event: 'notification.updated',
+          tenant_id: String(tenant_id),
+          notification_id: String(payload.notification_id || payload.event_id || 'n-1'),
+          status: canonicalStatus,
+          channel: String(payload.channel || 'EMAIL').toUpperCase(),
+          recipient_id: payload.recipient_id ? String(payload.recipient_id) : undefined,
+          recipient_masked: payload.recipient_masked,
+          attempt: payload.attempt !== undefined ? Number(payload.attempt) : 1,
+          job_id: payload.job_id ? String(payload.job_id) : undefined,
+          error_reason: payload.error_reason,
+          timestamp: payload.timestamp || new Date().toISOString(),
+          correlation_id: payload.correlation_id,
+          event_id: payload.event_id,
+        };
+        dispatchNamespace.to(tenant_id).emit('notification.updated', canonicalNotificationPayload);
+        messagesSent++;
+      }
       
     } catch (e) {
       console.error('Error parsing dispatch event from Redis:', e);
@@ -318,6 +344,72 @@ app.get('/sla-alerts/config', (req, res) => {
     valid_severities: ['AT_RISK', 'BREACHED', 'CRITICAL', 'INFO', 'RESOLVED', 'WARNING'],
   });
 });
+
+// Canonical Notification Updates config endpoint
+app.get('/notifications/config', (req, res) => {
+  res.json({
+    event: 'notification.updated',
+    transport: 'REDIS_PUB_SUB_TO_WEBSOCKET',
+    namespace: '/dispatch-dashboard',
+    source_of_truth: 'POSTGRESQL',
+    valid_statuses: ['ACCEPTED', 'DELIVERED', 'FAILED', 'PENDING', 'PERMANENT_FAILURE', 'QUEUED', 'READ', 'RETRIED', 'SENT'],
+  });
+});
+
+// Broadcast notification update directly via HTTP into the WebSocket server
+app.post('/notifications/broadcast', (req, res) => {
+  const payload = req.body;
+  if (!payload || typeof payload !== 'object') {
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+
+  const { notification_id, status, tenant_id, event_id } = payload;
+  if (!notification_id || !tenant_id) {
+    return res.status(400).json({
+      error: 'notification_id and tenant_id are mandatory fields',
+    });
+  }
+
+  const normStatus = String(status || 'SENT').toUpperCase();
+
+  if (isDuplicateEvent(event_id)) {
+    return res.status(200).json({
+      event: 'notification.updated',
+      tenant_id: String(tenant_id),
+      notification_id: String(notification_id),
+      status: normStatus,
+      duplicate: true,
+      status_code: 'SKIPPED',
+    });
+  }
+
+  const canonicalPayload = {
+    event: 'notification.updated',
+    tenant_id: String(tenant_id),
+    notification_id: String(notification_id),
+    status: normStatus,
+    channel: String(payload.channel || 'EMAIL').toUpperCase(),
+    recipient_id: payload.recipient_id ? String(payload.recipient_id) : undefined,
+    recipient_masked: payload.recipient_masked,
+    attempt: payload.attempt !== undefined ? Number(payload.attempt) : 1,
+    job_id: payload.job_id ? String(payload.job_id) : undefined,
+    error_reason: payload.error_reason,
+    timestamp: payload.timestamp || new Date().toISOString(),
+    correlation_id: payload.correlation_id,
+    event_id: event_id,
+  };
+
+  dispatchNamespace.to(tenant_id).emit('notification.updated', canonicalPayload);
+  messagesSent++;
+
+  return res.json({
+    event: 'notification.updated',
+    tenant_id: String(tenant_id),
+    notification_id: String(notification_id),
+    status: normStatus,
+  });
+});
+
 
 // Broadcast SLA alert directly via HTTP into the WebSocket server
 app.post('/sla-alerts/broadcast', (req, res) => {

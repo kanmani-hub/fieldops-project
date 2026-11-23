@@ -1579,6 +1579,24 @@ from app.services.sla_alert_broadcaster import (
 )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Notification Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.notification_update_broadcaster import (
+    DEFAULT_NOTIFICATION_UPDATE_CONFIG,
+    VALID_NOTIFICATION_STATUSES,
+    send_notification_updates,
+    get_notification_update_config,
+    NotificationUpdateBroadcaster,
+    SendNotificationUpdates,
+    Send_notification_updates,
+    broadcast_notification_update,
+    get_notification_update_status,
+)
+
+
+
 
 
 
