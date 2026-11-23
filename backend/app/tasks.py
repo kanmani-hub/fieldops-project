@@ -4574,6 +4574,69 @@ SendNotificationUpdatesTask = send_notification_updates_task
 Send_notification_updates_task = send_notification_updates_task
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Payment Updates Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_payment_updates_task",
+)
+def send_payment_updates_task(
+    invoice_id: Union[str, int] = "10001",
+    payment_status: str = "PAID",
+    tenant_id: Union[str, int] = "tenant-1",
+    status: Optional[str] = None,
+    payment_id: Optional[Union[str, int]] = None,
+    job_id: Optional[Union[str, int]] = None,
+    customer_id: Optional[Union[str, int]] = None,
+    amount: Optional[Union[int, float, str]] = None,
+    currency: str = "USD",
+    payment_method: Optional[str] = None,
+    error_reason: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    schema_version: int = 1,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative payment update to WebSocket clients."""
+    from app.services.payment_update_broadcaster import send_payment_updates
+    return send_payment_updates(
+        invoice_id=invoice_id,
+        payment_status=payment_status,
+        tenant_id=tenant_id,
+        status=status,
+        payment_id=payment_id,
+        job_id=job_id,
+        customer_id=customer_id,
+        amount=amount,
+        currency=currency,
+        payment_method=payment_method,
+        error_reason=error_reason,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        timestamp=timestamp,
+        schema_version=schema_version,
+    )
+
+
+from app.services.payment_update_broadcaster import (
+    DEFAULT_PAYMENT_UPDATE_CONFIG,
+    VALID_PAYMENT_STATUSES,
+    send_payment_updates,
+    get_payment_update_config,
+    PaymentUpdateBroadcaster,
+    SendPaymentUpdates,
+    Send_payment_updates,
+    broadcast_payment_update,
+    get_payment_update_status,
+)
+
+SendPaymentUpdatesTask = send_payment_updates_task
+Send_payment_updates_task = send_payment_updates_task
+
+
+
 
 
 

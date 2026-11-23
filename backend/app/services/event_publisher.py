@@ -273,6 +273,50 @@ def publish_payment_event(
             e,
         )
 
+    # Trigger canonical payment update broadcast for WebSocket real-time consumers
+    try:
+        from app.services.payment_update_broadcaster import send_payment_updates
+        norm_st = "PAID" if "success" in event_type.lower() or "paid" in event_type.lower() or "completed" in event_type.lower() else (
+            "REFUNDED" if "refund" in event_type.lower() else (
+                "FAILED" if "fail" in event_type.lower() or "decline" in event_type.lower() else (
+                    "PENDING" if "init" in event_type.lower() or "pending" in event_type.lower() else "PAID"
+                )
+            )
+        )
+        inv_id = str(job_id)
+        amt = None
+        curr = "USD"
+        p_method = None
+        err_msg = None
+        if payload and isinstance(payload, dict):
+            if payload.get("status") or payload.get("payment_status"):
+                norm_st = str(payload.get("status") or payload.get("payment_status")).upper()
+            if payload.get("invoice_id"):
+                inv_id = str(payload.get("invoice_id"))
+            amt = payload.get("amount")
+            curr = payload.get("currency", "USD")
+            p_method = payload.get("payment_method")
+            err_msg = payload.get("error_reason") or payload.get("error_message") or payload.get("error")
+
+        send_payment_updates(
+            invoice_id=inv_id,
+            payment_status=norm_st,
+            tenant_id=tenant_id,
+            payment_id=payment_id,
+            job_id=job_id,
+            amount=amt,
+            currency=curr,
+            payment_method=p_method,
+            error_reason=err_msg,
+            correlation_id=correlation_id,
+            event_id=event_id,
+            timestamp=timestamp,
+            redis_client=redis_client,
+        )
+    except Exception as pub_notify_err:
+        logger.warning("Failed secondary broadcast of payment update: %s", pub_notify_err)
+
+
 
 def publish_audit_event(
     redis_client,
@@ -754,6 +798,24 @@ from app.services.notification_update_broadcaster import (
     broadcast_notification_update,
     get_notification_update_status,
 )
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Payment Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.payment_update_broadcaster import (
+    DEFAULT_PAYMENT_UPDATE_CONFIG,
+    VALID_PAYMENT_STATUSES,
+    send_payment_updates,
+    get_payment_update_config,
+    PaymentUpdateBroadcaster,
+    SendPaymentUpdates,
+    Send_payment_updates,
+    broadcast_payment_update,
+    get_payment_update_status,
+)
+
 
 
 

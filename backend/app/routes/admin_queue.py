@@ -2265,6 +2265,85 @@ def post_send_notification_update_endpoint(
     )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Payment Updates Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/websocket/payments/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_payment_updates_status_endpoint() -> dict:
+    """Return operational status for payment updates WebSocket real-time delivery."""
+    from app.services.payment_update_broadcaster import get_payment_update_config
+    return {
+        "status": "READY",
+        **get_payment_update_config(),
+    }
+
+
+@router.get(
+    "/websocket/payments/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_payment_updates_config_endpoint() -> dict:
+    """Return configuration contract for payment updates broadcasts."""
+    from app.services.payment_update_broadcaster import get_payment_update_config
+    return get_payment_update_config()
+
+
+@router.post(
+    "/websocket/payments/send",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_send_payment_update_endpoint(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Broadcast an authoritative payment/invoice update to the authenticated tenant room."""
+    from app.services.payment_update_broadcaster import send_payment_updates
+
+    invoice_id = payload.get("invoice_id") or payload.get("payment_id", "10001")
+    payment_status = payload.get("payment_status") or payload.get("status", "PAID")
+    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+
+    return send_payment_updates(
+        invoice_id=invoice_id,
+        payment_status=payment_status,
+        tenant_id=tenant_id,
+        status=payload.get("status"),
+        payment_id=payload.get("payment_id"),
+        job_id=payload.get("job_id"),
+        customer_id=payload.get("customer_id"),
+        amount=payload.get("amount"),
+        currency=payload.get("currency", "USD"),
+        payment_method=payload.get("payment_method"),
+        error_reason=payload.get("error_reason"),
+        correlation_id=payload.get("correlation_id"),
+        event_id=payload.get("event_id"),
+        timestamp=payload.get("timestamp"),
+    )
+
+
+
 
 
 

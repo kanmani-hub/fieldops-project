@@ -139,7 +139,7 @@ dispatchNamespace.on('connection', (socket) => {
   });
 });
 
-redisSubscriber.subscribe('dispatch_events', 'sla_events', 'notification_events', (err, count) => {
+redisSubscriber.subscribe('dispatch_events', 'sla_events', 'notification_events', 'payment_events', (err, count) => {
   if (err) {
     console.error('Failed to subscribe to Redis channels:', err);
   } else {
@@ -148,7 +148,7 @@ redisSubscriber.subscribe('dispatch_events', 'sla_events', 'notification_events'
 });
 
 redisSubscriber.on('message', (channel, message) => {
-  if (channel === 'dispatch_events' || channel === 'sla_events' || channel === 'notification_events') {
+  if (channel === 'dispatch_events' || channel === 'sla_events' || channel === 'notification_events' || channel === 'payment_events') {
     try {
       const payload = JSON.parse(message);
       
@@ -288,6 +288,33 @@ redisSubscriber.on('message', (channel, message) => {
         dispatchNamespace.to(tenant_id).emit('notification.updated', canonicalNotificationPayload);
         messagesSent++;
       }
+
+      // If payload represents a payment update and event was not already payment.updated,
+      // also broadcast canonical payment.updated event
+      if (
+        event !== 'payment.updated' &&
+        (payload.invoice_id || payload.payment_status || String(event).toLowerCase().includes('payment'))
+      ) {
+        const canonicalPaymentStatus = String(payload.payment_status || payload.status || 'PAID').toUpperCase();
+        const canonicalPaymentPayload = {
+          event: 'payment.updated',
+          tenant_id: String(tenant_id),
+          invoice_id: String(payload.invoice_id || payload.payment_id || payload.event_id || '10001'),
+          payment_status: canonicalPaymentStatus,
+          payment_id: payload.payment_id ? String(payload.payment_id) : undefined,
+          job_id: payload.job_id ? String(payload.job_id) : undefined,
+          customer_id: payload.customer_id ? String(payload.customer_id) : undefined,
+          amount: payload.amount,
+          currency: String(payload.currency || 'USD').toUpperCase(),
+          payment_method: payload.payment_method ? String(payload.payment_method).toUpperCase() : undefined,
+          error_reason: payload.error_reason,
+          timestamp: payload.timestamp || new Date().toISOString(),
+          correlation_id: payload.correlation_id,
+          event_id: payload.event_id,
+        };
+        dispatchNamespace.to(tenant_id).emit('payment.updated', canonicalPaymentPayload);
+        messagesSent++;
+      }
       
     } catch (e) {
       console.error('Error parsing dispatch event from Redis:', e);
@@ -355,6 +382,76 @@ app.get('/notifications/config', (req, res) => {
     valid_statuses: ['ACCEPTED', 'DELIVERED', 'FAILED', 'PENDING', 'PERMANENT_FAILURE', 'QUEUED', 'READ', 'RETRIED', 'SENT'],
   });
 });
+
+// Canonical Payment Updates config endpoint
+app.get('/payments/config', (req, res) => {
+  res.json({
+    event: 'payment.updated',
+    transport: 'REDIS_PUB_SUB_TO_WEBSOCKET',
+    namespace: '/dispatch-dashboard',
+    source_of_truth: 'POSTGRESQL',
+    valid_statuses: ['AUTHORIZED', 'CANCELLED', 'FAILED', 'PAID', 'PARTIALLY_REFUNDED', 'PENDING', 'PROCESSING', 'REFUNDED', 'SUCCESSFUL', 'UNAVAILABLE'],
+  });
+});
+
+// Broadcast payment update directly via HTTP into the WebSocket server
+app.post('/payments/broadcast', (req, res) => {
+  const payload = req.body;
+  if (!payload || typeof payload !== 'object') {
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+
+  const invoice_id = payload.invoice_id || payload.payment_id;
+  const { tenant_id, event_id } = payload;
+  const payment_status = payload.payment_status || payload.status || 'PAID';
+
+  if (!invoice_id || !tenant_id) {
+    return res.status(400).json({
+      error: 'invoice_id and tenant_id are mandatory fields',
+    });
+  }
+
+  const normStatus = String(payment_status).toUpperCase();
+
+  if (isDuplicateEvent(event_id)) {
+    return res.status(200).json({
+      event: 'payment.updated',
+      tenant_id: String(tenant_id),
+      invoice_id: String(invoice_id),
+      payment_status: normStatus,
+      duplicate: true,
+      status_code: 'SKIPPED',
+    });
+  }
+
+  const canonicalPayload = {
+    event: 'payment.updated',
+    tenant_id: String(tenant_id),
+    invoice_id: String(invoice_id),
+    payment_status: normStatus,
+    payment_id: payload.payment_id ? String(payload.payment_id) : undefined,
+    job_id: payload.job_id ? String(payload.job_id) : undefined,
+    customer_id: payload.customer_id ? String(payload.customer_id) : undefined,
+    amount: payload.amount,
+    currency: String(payload.currency || 'USD').toUpperCase(),
+    payment_method: payload.payment_method ? String(payload.payment_method).toUpperCase() : undefined,
+    error_reason: payload.error_reason,
+    timestamp: payload.timestamp || new Date().toISOString(),
+    correlation_id: payload.correlation_id,
+    event_id: event_id,
+  };
+
+  dispatchNamespace.to(tenant_id).emit('payment.updated', canonicalPayload);
+  messagesSent++;
+
+  return res.json({
+    event: 'payment.updated',
+    tenant_id: String(tenant_id),
+    invoice_id: String(invoice_id),
+    payment_status: normStatus,
+  });
+});
+
 
 // Broadcast notification update directly via HTTP into the WebSocket server
 app.post('/notifications/broadcast', (req, res) => {

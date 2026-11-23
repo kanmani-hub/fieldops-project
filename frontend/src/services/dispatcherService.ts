@@ -112,6 +112,25 @@ export interface NotificationUpdatePayload {
   event_id?: string;
 }
 
+export interface PaymentUpdatePayload {
+  event: string;
+  tenant_id: string;
+  invoice_id: string;
+  payment_status: "PAID" | "PENDING" | "FAILED" | "REFUNDED" | "PARTIALLY_REFUNDED" | "PROCESSING" | "CANCELLED" | "AUTHORIZED" | string;
+  status?: string;
+  payment_id?: string;
+  job_id?: string;
+  customer_id?: string;
+  amount?: number | string;
+  currency?: string;
+  payment_method?: string;
+  error_reason?: string;
+  timestamp?: string;
+  correlation_id?: string;
+  event_id?: string;
+}
+
+
 
 
 /**
@@ -188,6 +207,29 @@ export const subscribeNotificationUpdates = (
   };
 };
 
+/**
+ * Helper to subscribe to real-time payment/invoice lifecycle updates on a Socket.IO connection.
+ */
+export const subscribePaymentUpdates = (
+  socket: any,
+  callback: (event: PaymentUpdatePayload) => void
+): (() => void) => {
+  if (!socket) return () => {};
+  const handler = (payload: PaymentUpdatePayload) => {
+    callback(payload);
+  };
+  socket.on("payment.updated", handler);
+  socket.on("payment_success", handler);
+  socket.on("payment_failed", handler);
+  socket.on("payment_refunded", handler);
+  return () => {
+    socket.off("payment.updated", handler);
+    socket.off("payment_success", handler);
+    socket.off("payment_failed", handler);
+    socket.off("payment_refunded", handler);
+  };
+};
+
 const dispatcherService = {
   getDispatchers,
   provisionTechnician,
@@ -195,7 +237,9 @@ const dispatcherService = {
   subscribeJobStatusUpdates,
   subscribeSLAAlerts,
   subscribeNotificationUpdates,
+  subscribePaymentUpdates,
 };
+
 
 
 
