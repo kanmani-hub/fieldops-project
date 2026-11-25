@@ -9,6 +9,7 @@ import {
   EyeOff,
   Lock,
   Mail,
+  Phone,
   ShieldCheck,
   User,
   AlertCircle,
@@ -17,6 +18,7 @@ import {
 import api from "../services/api";
 import useAuthStore from "../store/authStore";
 import logo from "../assets/logo.png";
+import LocationPickerMap from "../components/customer-tracking/LocationPickerMap";
 
 type Step = "details" | "otp" | "password" | "success";
 
@@ -41,10 +43,15 @@ export default function OrganizationOnboardingPage({
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
+  const [phoneNumber, setPhoneNumber] = useState("");
 
   const [address, setAddress] = useState("");
   const [siteLatitude, setSiteLatitude] = useState<number | null>(null);
   const [siteLongitude, setSiteLongitude] = useState<number | null>(null);
+  const [showMapPicker, setShowMapPicker] = useState(false);
+  const [mapLatitude, setMapLatitude] = useState(13.0827);
+  const [mapLongitude, setMapLongitude] = useState(80.2707);
+  const [mapAddress, setMapAddress] = useState("");
   const [isGettingLocation, setIsGettingLocation] = useState(false);
 
   const [otp, setOtp] = useState("");
@@ -97,6 +104,11 @@ export default function OrganizationOnboardingPage({
 
     if (!email.trim()) {
       setError("Please enter the admin email.");
+      return;
+    }
+
+    if (!/^\d{10}$/.test(phoneNumber)) {
+      setError("Enter a valid 10-digit phone number.");
       return;
     }
 
@@ -188,6 +200,7 @@ export default function OrganizationOnboardingPage({
         onboarding_id: onboardingId,
         password,
         confirm_password: confirmPassword,
+        phone_number: phoneNumber,
       });
 
       if (isHeadPortal) {
@@ -364,6 +377,23 @@ export default function OrganizationOnboardingPage({
                 A verification code will be sent to this email.
               </span>
             </div>
+            <div style={styles.fieldGroup}>
+              <label style={styles.label}>Phone Number *</label>
+              <div style={styles.inputWrapper}>
+                <Phone size={18} style={styles.icon} />
+                <input
+                  type="tel"
+                  inputMode="numeric"
+                  autoComplete="tel-national"
+                  placeholder="10-digit phone number"
+                  value={phoneNumber}
+                  maxLength={10}
+                  onChange={(e) => setPhoneNumber(e.target.value.replace(/\D/g, "").slice(0, 10))}
+                  style={styles.input}
+                />
+              </div>
+              <span style={styles.helpText}>Enter exactly 10 digits.</span>
+            </div>
             {/* ORGANIZATION LOCATION */}
             <div style={styles.fieldGroup}>
               <div
@@ -375,8 +405,9 @@ export default function OrganizationOnboardingPage({
               >
                 <label style={styles.label}>Organization Location *</label>
 
-                <span
-                  onClick={() => {
+                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                  <span
+                    onClick={() => {
                     if (!navigator.geolocation) {
                       setError("Geolocation is not supported by this browser.");
                       return;
@@ -404,6 +435,9 @@ export default function OrganizationOnboardingPage({
                             setAddress(response.data.address);
                             setSiteLatitude(latitude);
                             setSiteLongitude(longitude);
+                            setMapLatitude(latitude);
+                            setMapLongitude(longitude);
+                            setMapAddress(response.data.address);
                           } else {
                             setError(
                               response.data?.message ||
@@ -428,38 +462,53 @@ export default function OrganizationOnboardingPage({
                         maximumAge: 0,
                       },
                     );
-                  }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "5px",
-                    color: "#5C9470",
-                    fontSize: "12px",
-                    cursor: "pointer",
-                  }}
-                >
-                  {isGettingLocation ? (
-                    <>
-                      <span
-                        style={{
-                          width: "12px",
-                          height: "12px",
-                          border: "2px solid #5C9470",
-                          borderTopColor: "transparent",
-                          borderRadius: "50%",
-                          display: "inline-block",
-                          animation: "spin 0.8s linear infinite",
-                        }}
-                      />
-                      <span>Getting location...</span>
-                    </>
-                  ) : (
-                    <>
-                      <MapPin size={14} />
-                      <span>Use current location</span>
-                    </>
-                  )}
-                </span>
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "5px",
+                      color: "#5C9470",
+                      fontSize: "12px",
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {isGettingLocation ? (
+                      <>
+                        <span
+                          style={{
+                            width: "12px",
+                            height: "12px",
+                            border: "2px solid #5C9470",
+                            borderTopColor: "transparent",
+                            borderRadius: "50%",
+                            display: "inline-block",
+                            animation: "spin 0.8s linear infinite",
+                          }}
+                        />
+                        <span>Getting location...</span>
+                      </>
+                    ) : (
+                      <>
+                        <MapPin size={14} />
+                        <span>Use current location</span>
+                      </>
+                    )}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMapLatitude(siteLatitude ?? 13.0827);
+                      setMapLongitude(siteLongitude ?? 80.2707);
+                      setMapAddress(address);
+                      setShowMapPicker(true);
+                    }}
+                    style={styles.mapButton}
+                  >
+                    <MapPin size={14} />
+                    Pick on map
+                  </button>
+                </div>
               </div>
 
               <div style={styles.inputWrapper}>
@@ -496,6 +545,47 @@ export default function OrganizationOnboardingPage({
                 </>
               )}
             </button>
+          </div>
+        )}
+
+        {showMapPicker && (
+          <div style={styles.mapOverlay} role="dialog" aria-modal="true" aria-label="Pick organization location">
+            <div style={styles.mapDialog}>
+              <div style={styles.mapDialogHeader}>
+                <div>
+                  <h2 style={styles.mapDialogTitle}>Pick organization location</h2>
+                  <p style={styles.mapDialogSubtitle}>Click the map or drag the pin to choose the address.</p>
+                </div>
+                <button type="button" onClick={() => setShowMapPicker(false)} style={styles.mapCloseButton} aria-label="Close map">×</button>
+              </div>
+              <LocationPickerMap
+                latitude={mapLatitude}
+                longitude={mapLongitude}
+                onChange={(latitude, longitude, selectedAddress) => {
+                  setMapLatitude(latitude);
+                  setMapLongitude(longitude);
+                  setMapAddress(selectedAddress || "");
+                }}
+              />
+              {mapAddress ? <p style={styles.selectedMapAddress}>{mapAddress}</p> : null}
+              <div style={styles.mapDialogActions}>
+                <button type="button" onClick={() => setShowMapPicker(false)} style={styles.mapCancelButton}>Cancel</button>
+                <button
+                  type="button"
+                  disabled={!mapAddress.trim()}
+                  onClick={() => {
+                    setAddress(mapAddress);
+                    setSiteLatitude(mapLatitude);
+                    setSiteLongitude(mapLongitude);
+                    setShowMapPicker(false);
+                    setError("");
+                  }}
+                  style={{ ...styles.mapConfirmButton, ...(!mapAddress.trim() ? styles.disabled : {}) }}
+                >
+                  Use this location
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -996,6 +1086,109 @@ const styles: Record<string, React.CSSProperties> = {
     color: "rgba(167,199,183,.85)",
     fontSize: "13px",
     fontWeight: 500,
+    cursor: "pointer",
+  },
+
+  mapButton: {
+    alignSelf: "flex-start",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "7px",
+    padding: "9px 12px",
+    border: "1px solid rgba(34,197,94,.25)",
+    borderRadius: "8px",
+    background: "rgba(10,26,18,.55)",
+    color: "#86efac",
+    fontSize: "12px",
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+
+  mapOverlay: {
+    position: "fixed",
+    inset: 0,
+    zIndex: 1000,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "20px",
+    background: "rgba(2,12,8,.78)",
+    boxSizing: "border-box",
+  },
+
+  mapDialog: {
+    width: "min(100%, 900px)",
+    maxHeight: "calc(100vh - 40px)",
+    overflowY: "auto",
+    padding: "20px",
+    border: "1px solid rgba(34,197,94,.2)",
+    borderRadius: "16px",
+    background: "#10251a",
+    boxShadow: "0 24px 70px rgba(0,0,0,.5)",
+    boxSizing: "border-box",
+  },
+
+  mapDialogHeader: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: "12px",
+    marginBottom: "14px",
+  },
+
+  mapDialogTitle: {
+    margin: 0,
+    color: "#e8f5ee",
+    fontSize: "18px",
+  },
+
+  mapDialogSubtitle: {
+    margin: "5px 0 0",
+    color: "rgba(167,199,183,.7)",
+    fontSize: "12px",
+  },
+
+  mapCloseButton: {
+    width: "34px",
+    height: "34px",
+    border: "1px solid rgba(167,199,183,.25)",
+    borderRadius: "8px",
+    background: "transparent",
+    color: "#c5d8cc",
+    fontSize: "22px",
+    cursor: "pointer",
+  },
+
+  selectedMapAddress: {
+    color: "#c5d8cc",
+    fontSize: "12px",
+    lineHeight: 1.5,
+    margin: "10px 2px 0",
+  },
+
+  mapDialogActions: {
+    display: "flex",
+    justifyContent: "flex-end",
+    gap: "10px",
+    marginTop: "16px",
+  },
+
+  mapCancelButton: {
+    padding: "10px 16px",
+    border: "1px solid rgba(167,199,183,.25)",
+    borderRadius: "8px",
+    background: "transparent",
+    color: "#c5d8cc",
+    cursor: "pointer",
+  },
+
+  mapConfirmButton: {
+    padding: "10px 16px",
+    border: "none",
+    borderRadius: "8px",
+    background: "#15803d",
+    color: "#fff",
+    fontWeight: 700,
     cursor: "pointer",
   },
 

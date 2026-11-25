@@ -2713,6 +2713,10 @@ async def update_technician_availability_location(
                 "technician_id": str(technician.technician_id),
             },
         )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Technician location was saved but availability cache is unavailable; retry shortly.",
+        )
 
     return {
         **location_data,

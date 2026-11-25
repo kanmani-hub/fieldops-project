@@ -205,24 +205,30 @@ export default function ServiceRequestForm({ requestId }: { requestId?: number }
   const [issue, setIssue] = useState("");
   const [priority, setPriority] = useState<(typeof priorities)[number]>("MEDIUM");
   const [todayKey, setTodayKey] = useState(() => localDateKey(new Date()));
-  const [preferredDate, setPreferredDate] = useState(() =>
-    localDateKey(addDays(new Date(), 1)),
-  );
+  const [nowMinutes, setNowMinutes] = useState(() => {
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes();
+  });
+  // Start with the earliest candidate date; the availability effect below
+  // advances it to tomorrow only when today has no slot meeting the 3h lead.
+  const [preferredDate, setPreferredDate] = useState(() => localDateKey(new Date()));
   const [preferredTime, setPreferredTime] = useState("");
   const [location, setLocation] = useState("");
   const [contactNumber, setContactNumber] = useState("");
   const [latitude, setLatitude] = useState("");
   const [longitude, setLongitude] = useState("");
   const [locationConfirmed, setLocationConfirmed] = useState(false);
+  const [locationFromProfile, setLocationFromProfile] = useState(false);
   const [showLocationSuggestions, setShowLocationSuggestions] = useState(false);
   const [locationResults, setLocationResults] = useState<LocationSearchResult[]>([]);
   const [locationSearchBusy, setLocationSearchBusy] = useState(false);
   const [locationSearchError, setLocationSearchError] = useState("");
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [taxonomyBrowseLevel, setTaxonomyBrowseLevel] = useState<"categories" | "issues">("categories");
-  const { serviceType: serviceTypeParam } =
+  const { serviceType: serviceTypeParam, search: searchParam } =
     useLocalSearchParams<{
       serviceType?: string | string[];
+      search?: string | string[];
     }>();
 
   // Keep the booking calendar in sync when the app stays open across midnight.
@@ -256,27 +262,44 @@ export default function ServiceRequestForm({ requestId }: { requestId?: number }
     };
   }, []);
 
-  // If the previously selected tomorrow becomes today at midnight,
-  // move the selection forward and clear the old time slot.
+  // If the previously selected date becomes today at midnight,
+  // keep it selected only when a same-day slot still meets the lead time.
   useEffect(() => {
     if (editing || !preferredDate || preferredDate > todayKey) return;
+
+    const minTodayMinutes = nowMinutes + 180;
+    const todayHasSlots = nowMinutes < 19 * 60 && Array.from({ length: 23 }, (_, index) => 8 * 60 + index * 30)
+      .some((slotMinutes) => slotMinutes >= minTodayMinutes);
+    if (preferredDate === todayKey && todayHasSlots) return;
 
     const tomorrow = addDays(new Date(`${todayKey}T12:00:00`), 1);
     setPreferredDate(localDateKey(tomorrow));
     setPreferredTime("");
-  }, [editing, preferredDate, todayKey]);
+  }, [editing, preferredDate, todayKey, nowMinutes]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = new Date();
+      setTodayKey(localDateKey(now));
+      setNowMinutes(now.getHours() * 60 + now.getMinutes());
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Receive the confirmed location when the Ola Maps picker returns to this form.
   // Also refresh the calendar date whenever the form regains focus.
   useFocusEffect(
     useCallback(() => {
-      setTodayKey(localDateKey(new Date()));
+      const now = new Date();
+      setTodayKey(localDateKey(now));
+      setNowMinutes(now.getHours() * 60 + now.getMinutes());
       const selectedLocation = consumePickedServiceLocation();
       if (!selectedLocation) return;
 
       setLocation(selectedLocation.address);
       setLatitude(selectedLocation.latitude.toFixed(6));
       setLongitude(selectedLocation.longitude.toFixed(6));
+      setLocationFromProfile(false);
       setLocationConfirmed(true);
       setLocationResults([]);
       setLocationSearchError("");
@@ -316,6 +339,8 @@ const homeCategoryName = (
     ? serviceTypeParam[0]
     : serviceTypeParam
 )?.trim() || "";
+const homeSearchQuery = (Array.isArray(searchParam) ? searchParam[0] : searchParam)?.trim() || "";
+const normalizedHomeSearch = homeSearchQuery.toLowerCase().replace(/[^a-z0-9]/g, "");
 const homeTaxonomy = SERVICE_CATALOGUE_TAXONOMY.find((type) => type.id === homeCategoryName || type.name === homeCategoryName) || null;
 
 const visibleCatalog = useMemo(
@@ -323,9 +348,11 @@ const visibleCatalog = useMemo(
     catalog.filter(
       (item) =>
         item.is_active !== false &&
-        (homeTaxonomy ? matchesTaxonomyType(item, homeTaxonomy) : matchesHomeCategory(item, homeCategoryName)),
+        (homeTaxonomy ? matchesTaxonomyType(item, homeTaxonomy) : matchesHomeCategory(item, homeCategoryName)) &&
+        (!normalizedHomeSearch || [item.service_type, item.category, item.issue, item.description]
+          .some((value) => String(value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "").includes(normalizedHomeSearch))),
     ),
-  [catalog, homeCategoryName, homeTaxonomy],
+  [catalog, homeCategoryName, homeTaxonomy, normalizedHomeSearch],
 );
 
 const availableTaxonomies = useMemo(
@@ -382,8 +409,11 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
       };
     });
   }, [todayKey]);
-  const firstAvailableDate = availableDates[1]?.key || localDateKey(addDays(new Date(), 1));
+  const firstAvailableDate = availableDates[0]?.key || todayKey;
   const lastAvailableDate = availableDates[availableDates.length - 1]?.key || firstAvailableDate;
+  const tomorrowKey = availableDates[1]?.key || localDateKey(addDays(new Date(`${todayKey}T12:00:00`), 1));
+  const overnightBooking = nowMinutes >= 20 * 60;
+  const minTodayMinutes = nowMinutes + 180;
   const availableTimes = useMemo(
     () =>
       Array.from({ length: 23 }, (_, index) => {
@@ -398,6 +428,10 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
       }),
     [],
   );
+  const todaySlotsAvailable = nowMinutes < 19 * 60 && availableTimes.some((slot) => {
+    const [hours, minutes] = slot.key.split(":").map(Number);
+    return hours * 60 + minutes >= minTodayMinutes;
+  });
 
   const categories = useMemo(
     () =>
@@ -459,12 +493,24 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
           if (matching) { setCategory(matching.category); setIssue(matching.issue); }
         } else {
           setContactNumber(profileResult?.mobile_number || "");
-          setLocation([profileResult?.address, profileResult?.city, profileResult?.state, profileResult?.pincode].filter(Boolean).join(", "));
+          const profileAddress = [
+            profileResult?.address,
+            profileResult?.city,
+            profileResult?.state,
+            profileResult?.pincode,
+          ].filter((part): part is string => Boolean(part?.trim())).join(", ");
+          setLocation(profileAddress);
+          setLocationFromProfile(Boolean(profileAddress));
+          setLocationConfirmed(Boolean(profileAddress));
+          setLatitude("");
+          setLongitude("");
 
           const matchingItems = items.filter(
             (item) =>
               item.is_active !== false &&
-              matchesHomeCategory(item, homeCategoryName),
+              matchesHomeCategory(item, homeCategoryName) &&
+              (!normalizedHomeSearch || [item.service_type, item.category, item.issue, item.description]
+                .some((value) => String(value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "").includes(normalizedHomeSearch))),
           );
 
           if (matchingItems.length === 0) {
@@ -473,7 +519,9 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
             setIssue("");
             setTitle("");
             setDescription("");
-            if (homeCategoryName) {
+            if (homeSearchQuery) {
+              setError(`No active services match “${homeSearchQuery}”.`);
+            } else if (homeCategoryName) {
               setError(`No active services are currently available for ${homeCategoryName}.`);
             }
             return;
@@ -492,7 +540,7 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
     }
     void load();
     return () => { active = false; };
-  }, [editing, requestId, homeCategoryName]);
+  }, [editing, requestId, homeCategoryName, homeSearchQuery]);
 
   const chooseServiceType = (value: string) => {
     setServiceType(value);
@@ -526,6 +574,7 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
 
   const chooseLocation = (result: LocationSearchResult) => {
     setLocation(result.formatted_address);
+    setLocationFromProfile(false);
     setLatitude(result.latitude.toFixed(6));
     setLongitude(result.longitude.toFixed(6));
     setLocationConfirmed(true);
@@ -610,6 +659,7 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
       setLatitude(lat.toFixed(6));
       setLongitude(lon.toFixed(6));
       setLocation(address.trim());
+      setLocationFromProfile(false);
       setLocationConfirmed(true);
       setLocationResults([]);
       setLocationSearchError("");
@@ -631,11 +681,9 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
     if (!/^\d{4}-\d{2}-\d{2}$/.test(preferredDate.trim())) {
       return "Choose a preferred service date.";
     }
-    if (!editing && preferredDate <= todayKey) {
-      return "Today's booking is closed. Choose tomorrow or a later date.";
-    }
+    if (!editing && preferredDate < todayKey) return "Choose today or a later service date.";
     if (!editing && (preferredDate < firstAvailableDate || preferredDate > lastAvailableDate)) {
-      return "Choose a service date from tomorrow through the next 3 days.";
+      return "Choose a service date from today through the next 4 days.";
     }
     if (!editing && !preferredTime) {
       return "Choose an available service time slot.";
@@ -643,13 +691,22 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
     if (!editing && !availableTimes.some((slot) => slot.key === preferredTime)) {
       return "Choose a service time between 8:00 AM and 7:00 PM.";
     }
+    if (!editing && preferredDate === todayKey) {
+      const [hours, minutes] = preferredTime.split(":").map(Number);
+      if (!todaySlotsAvailable || hours * 60 + minutes < nowMinutes + 180) {
+        return "Choose a time slot at least 3 hours from now, or select another date.";
+      }
+    }
+    if (!editing && overnightBooking && preferredDate === tomorrowKey && preferredTime.split(":").map(Number)[0] < 11) {
+      return "Bookings made after 8:00 PM must use a slot from 11:00 AM tomorrow onward.";
+    }
     if (!editing && isPastTimeSlot(preferredDate, preferredTime)) {
       return "Choose an available future time slot.";
     }
     if (!editing && !locationConfirmed) {
       return "Choose an address suggestion or use your current location to confirm the service address.";
     }
-    if (!editing) {
+    if (!editing && !locationFromProfile) {
       const lat = Number(latitude);
       const lon = Number(longitude);
       if (
@@ -728,8 +785,8 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
           category,
           issue,
           images: [],
-          site_latitude: Number(latitude),
-          site_longitude: Number(longitude),
+          site_latitude: latitude ? Number(latitude) : null,
+          site_longitude: longitude ? Number(longitude) : null,
           preferred_service_time: preferredTime,
         };
         result = await customerApi.createRequest(payload);
@@ -808,12 +865,12 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
           <Text style={{ color: colors.text, fontSize: 13, fontWeight: "800" }}>Choose a service date</Text>
           <Text style={{ color: colors.danger, fontSize: 13, fontWeight: "900" }}>*</Text>
         </View>
-        <Text style={{ color: colors.muted, fontSize: 11 }}>Today is closed · Book tomorrow or a later date</Text>
+        <Text style={{ color: colors.muted, fontSize: 11 }}>{overnightBooking ? "Bookings made after 8:00 PM can be scheduled tomorrow from 11:00 AM onward." : "Choose today when a time slot is at least 3 hours away, or book a later date."}</Text>
       </View>
       <View style={{ flexDirection: "row", flexWrap: "nowrap", columnGap: 8, rowGap: 8, paddingVertical: 2 }}>
         {availableDates.map((date) => {
           const selected = preferredDate === date.key;
-          const closed = date.key === todayKey;
+          const closed = date.key === todayKey && !todaySlotsAvailable;
           return (
             <Pressable
               key={date.key}
@@ -844,17 +901,20 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
             </View>
             <Text style={{ color: colors.muted, fontSize: 11 }}>8:00 AM – 7:00 PM · Every 30 minutes</Text>
           </View>
-          {preferredDate && preferredDate <= todayKey ? (
+          {preferredDate === todayKey && !todaySlotsAvailable ? (
             <View style={{ padding: 12, borderRadius: 12, backgroundColor: "#F0F2F1" }}>
               <Text style={{ color: colors.muted, fontSize: 12, lineHeight: 18, fontWeight: "700" }}>
-                Today's time slots are closed. Please choose tomorrow or a later date.
+                No time slot is available at least 3 hours from now. Please choose tomorrow or a later date.
               </Text>
             </View>
-          ) : preferredDate ? (
+          ) : preferredDate && preferredDate >= todayKey ? (
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
               {availableTimes.map((slot) => {
-                const selected = preferredTime === slot.key;
-                const disabled = isPastTimeSlot(preferredDate, slot.key);
+                const [slotHours, slotMinutes] = slot.key.split(":").map(Number);
+                const disabled = isPastTimeSlot(preferredDate, slot.key) ||
+                  (preferredDate === todayKey && slotHours * 60 + slotMinutes < minTodayMinutes) ||
+                  (overnightBooking && preferredDate === tomorrowKey && slotHours * 60 + slotMinutes < 11 * 60);
+                const selected = !disabled && preferredTime === slot.key;
                 return (
                   <Pressable
                     key={slot.key}
@@ -933,7 +993,7 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
 
         {step === 1 ? <>
           <Card style={{ gap: 16 }}>
-            <Text style={{ color: colors.text, fontSize: 17, fontWeight: "900" }}>Choose a service</Text>
+            <Text style={{ color: colors.text, fontSize: 17, fontWeight: "900" }}>{homeSearchQuery ? `Search results for “${homeSearchQuery}”` : "Choose a service"}</Text>
             {catalog.length === 0 || visibleCatalog.length === 0 ? <Text style={{ color: colors.warning, fontSize: 13, lineHeight: 19 }}>No active services are available for this category right now. Please go back and choose another service category.</Text> : null}
 
             {types.length > 1 ? <View style={{ gap: 8 }}>
@@ -995,7 +1055,7 @@ const selectedTaxonomy = homeTaxonomy || availableTaxonomies.find((type) =>
 
           <Card style={{ gap: 15 }}>
             <Text style={{ color: colors.text, fontSize: 17, fontWeight: "900" }}>Service address</Text>
-            <Field label="Search / enter service address" value={location} editable={!editing} onFocus={() => { if (!editing) setShowLocationSuggestions(true); }} onChangeText={(value) => { setLocation(value); setLatitude(""); setLongitude(""); setLocationConfirmed(false); setShowLocationSuggestions(true); }} placeholder="Street, area or landmark" multiline />
+            <Field label="Search / enter service address" value={location} editable={!editing} onFocus={() => { if (!editing) setShowLocationSuggestions(true); }} onChangeText={(value) => { setLocation(value); setLatitude(""); setLongitude(""); setLocationFromProfile(false); setLocationConfirmed(false); setShowLocationSuggestions(true); }} placeholder="Street, area or landmark" multiline />
             {addressSuggestions}
             {locationActions}
             <Field label="Contact phone" value={contactNumber} onChangeText={(value) => setContactNumber(value.replace(/\D/g, "").slice(0, 10))} placeholder="10-digit phone number" keyboardType="phone-pad" maxLength={10} />

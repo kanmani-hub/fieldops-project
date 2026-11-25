@@ -100,9 +100,12 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
   // Platform Aggregate Stats
   const [stats, setStats] = useState<PlatformHeadStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState("");
+  const [dashboardOrgFilter, setDashboardOrgFilter] = useState("ALL");
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
 
   // Dashboard Analytics Controls
-  const [analyticsTimeframe, setAnalyticsTimeframe] = useState<"30d" | "90d" | "all">("30d");
+  const [analyticsTimeframe, setAnalyticsTimeframe] = useState<"30d" | "90d" | "all">("all");
   const [hoveredTrendIndex, setHoveredTrendIndex] = useState<number | null>(null);
 
   // Organizations List
@@ -247,35 +250,17 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
 
   // Load Platform Stats
   const loadStats = useCallback(async () => {
+    setStatsError("");
     try {
-      const data = await getPlatformHeadStats();
-      const total = data.total_jobs;
-      const completed = data.completed_jobs;
-      const cancelled = data.cancelled_jobs;
-      const active = Math.max(0, total - completed - cancelled);
-      setStats({
-        ...data,
-        active_jobs: active,
-      });
-    } catch {
-      // Graceful fallback where Active + Completed + Cancelled === Total Jobs strictly
-      const total = 217;
-      const completed = 20;
-      const cancelled = 15;
-      const active = total - completed - cancelled; // 182
-      setStats({
-        total_organizations: 14,
-        total_jobs: total,
-        active_jobs: active,
-        completed_jobs: completed,
-        cancelled_jobs: cancelled,
-        total_payment: "₹1.8L",
-        raw_payment_amount: 180000,
-      });
+      const data = await getPlatformHeadStats({ tenant_id: dashboardOrgFilter, period: analyticsTimeframe });
+      setStats(data);
+      setLastUpdatedAt(new Date());
+    } catch (err: any) {
+      setStatsError(err?.response?.data?.detail || "Could not refresh dashboard metrics.");
     } finally {
       setStatsLoading(false);
     }
-  }, []);
+  }, [dashboardOrgFilter, analyticsTimeframe]);
 
   // Load Organizations List
   const loadOrganizations = useCallback(async (isSilent = false) => {
@@ -305,12 +290,14 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
   const [jobs, setJobs] = useState<PlatformJobItem[]>([]);
   const [jobsLoading, setJobsLoading] = useState(false);
   const [jobsError, setJobsError] = useState("");
-  const [jobsTotal, setJobsTotal] = useState(217);
-  const [jobsActiveCount, setJobsActiveCount] = useState(182);
-  const [jobsCompletedCount, setJobsCompletedCount] = useState(20);
-  const [jobsCancelledCount, setJobsCancelledCount] = useState(15);
+  const [jobsTotal, setJobsTotal] = useState(0);
+  const [jobsActiveCount, setJobsActiveCount] = useState(0);
+  const [jobsCompletedCount, setJobsCompletedCount] = useState(0);
+  const [jobsCancelledCount, setJobsCancelledCount] = useState(0);
   const [jobsSearch, setJobsSearch] = useState("");
   const [jobsStatusFilter, setJobsStatusFilter] = useState("ALL");
+  const [jobsPaymentFilter, setJobsPaymentFilter] = useState("ALL");
+  const [jobsPeriod, setJobsPeriod] = useState<"30d" | "90d" | "all">("all");
   const [jobsOrgFilter, setJobsOrgFilter] = useState("ALL");
   const [jobsPage, setJobsPage] = useState(1);
   const jobsLimit = 15;
@@ -359,13 +346,15 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
       const res = await getPlatformJobs({
         search: jobsSearch,
         status: jobsStatusFilter,
+        payment_status: jobsPaymentFilter,
+        period: jobsPeriod,
         tenant_id: jobsOrgFilter,
         page: jobsPage,
         limit: jobsLimit,
       });
       setJobs(res.data || []);
       setJobsTotal(res.total);
-      if (res.platform_total) {
+      if (res.platform_total !== undefined) {
         setJobsActiveCount(res.platform_active);
         setJobsCompletedCount(res.platform_completed);
         setJobsCancelledCount(res.platform_cancelled);
@@ -388,7 +377,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
     } finally {
       if (!isSilent) setJobsLoading(false);
     }
-  }, [jobsSearch, jobsStatusFilter, jobsOrgFilter, jobsPage]);
+  }, [jobsSearch, jobsStatusFilter, jobsPaymentFilter, jobsOrgFilter, jobsPeriod, jobsPage]);
 
   useEffect(() => {
     void loadStats();
@@ -459,6 +448,14 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
       (org.contact_email || "").toLowerCase().includes(q)
     );
   });
+
+  const openDashboardJobs = () => {
+    setJobsOrgFilter(dashboardOrgFilter);
+    setJobsPaymentFilter("ALL");
+    setJobsPeriod(analyticsTimeframe);
+    setJobsPage(1);
+    setActiveTab("jobs");
+  };
 
   return (
     <div
@@ -1019,11 +1016,15 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                       Platform Analytics & Revenue Intelligence
                     </h3>
                     <p style={{ fontSize: "13px", color: "#64748B", margin: "4px 0 0 0" }}>
-                      Real-time cross-tenant throughput, broadcast claim latency, and cross-organization revenue settlement
+                      Organization scoped operational totals and recorded closure/payment reconciliation.
                     </p>
                   </div>
 
-                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                    <select aria-label="Dashboard organization" value={dashboardOrgFilter} onChange={(e) => setDashboardOrgFilter(e.target.value)} style={{ padding: "8px 10px", borderRadius: "9px", border: "1px solid #CBD5E1", background: "#FFFFFF", color: "#334155", fontSize: "12px", maxWidth: "240px" }}>
+                      <option value="ALL">All organizations</option>
+                      {orgs.map((org) => <option key={org.id} value={org.id}>{org.name}</option>)}
+                    </select>
                     <div
                       style={{
                         display: "inline-flex",
@@ -1077,13 +1078,19 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                         border: "1px solid #A7F3D0",
                       }}
                     >
-                      <RefreshCw size={13} className={orgsLoading ? "is-spinning" : ""} />
-                      Auto-Sync (5s)
+                      <RefreshCw size={13} className={statsLoading ? "is-spinning" : ""} />
+                      {lastUpdatedAt ? `Updated ${lastUpdatedAt.toLocaleTimeString()}` : "Updating…"}
                     </span>
                   </div>
                 </div>
 
-                {/* Unified Analytical Telemetry Ribbon (Seamless strip, NOT isolated cards) */}
+                {statsError && (
+                  <div role="status" style={{ margin: "-8px 0 18px", padding: "10px 12px", borderRadius: "8px", background: "#FEF2F2", color: "#991B1B", fontSize: "12px" }}>
+                    {statsError} The last successfully loaded values remain visible.
+                  </div>
+                )}
+
+                {/* Unified Analytical Telemetry Ribbon */}
                 <div
                   style={{
                     background: "#F8FAFC",
@@ -1108,23 +1115,23 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                   >
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "6px" }}>
                       <span style={{ fontSize: "11px", fontWeight: 700, textTransform: "uppercase", color: "#64748B", letterSpacing: "0.04em" }}>
-                        Settled Revenue
+                        Recorded Closure Value
                       </span>
                       <span style={{ fontSize: "10px", fontWeight: 700, color: "#16A34A", background: "#DCFCE7", padding: "2px 6px", borderRadius: "10px", display: "inline-flex", alignItems: "center", gap: "2px" }}>
-                        <ArrowUpRight size={11} /> +24.8%
+                        Payment records
                       </span>
                     </div>
                     <div style={{ fontSize: "24px", fontWeight: 800, color: "#065F46", lineHeight: 1.1 }}>
-                      {statsLoading ? "—" : stats?.total_payment || "₹1.8L"}
+                      {statsLoading ? "—" : stats?.total_payment || "—"}
                     </div>
                     <div style={{ fontSize: "11px", color: "#64748B", marginTop: "4px" }}>
-                      All organizations volume
+                      {dashboardOrgFilter === "ALL" ? "Across all organizations" : orgs.find((org) => org.id === dashboardOrgFilter)?.name || "Selected organization"}
                     </div>
                   </div>
 
                   {/* Segment 2: Total Jobs */}
                   <div
-                    onClick={() => setActiveTab("jobs")}
+                    onClick={openDashboardJobs}
                     style={{
                       padding: "16px 20px",
                       borderRight: "1px solid #E2E8F0",
@@ -1142,20 +1149,20 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                         Total Dispatches
                       </span>
                       <span style={{ fontSize: "10px", fontWeight: 700, color: "#2563EB", background: "#EFF6FF", padding: "2px 6px", borderRadius: "10px" }}>
-                        Lifetime
+                        {analyticsTimeframe === "all" ? "Lifetime" : analyticsTimeframe === "30d" ? "30 days" : "90 days"}
                       </span>
                     </div>
                     <div style={{ fontSize: "24px", fontWeight: 800, color: "#1E40AF", lineHeight: 1.1 }}>
-                      {statsLoading ? "—" : stats?.total_jobs ?? 217}
+                      {statsLoading ? "—" : stats?.total_jobs ?? "—"}
                     </div>
                     <div style={{ fontSize: "11px", color: "#64748B", marginTop: "4px" }}>
-                      Platform ticket volume
+                      Jobs in the selected organization and period
                     </div>
                   </div>
 
                   {/* Segment 3: Active Jobs */}
                   <div
-                    onClick={() => setActiveTab("jobs")}
+                    onClick={openDashboardJobs}
                     style={{
                       padding: "16px 20px",
                       borderRight: "1px solid #E2E8F0",
@@ -1177,7 +1184,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                       </span>
                     </div>
                     <div style={{ fontSize: "24px", fontWeight: 800, color: "#B45309", lineHeight: 1.1 }}>
-                      {statsLoading ? "—" : stats?.active_jobs ?? 182}
+                      {statsLoading ? "—" : stats?.active_jobs ?? "—"}
                     </div>
                     <div style={{ fontSize: "11px", color: "#64748B", marginTop: "4px" }}>
                       In progress & on-site
@@ -1186,7 +1193,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
 
                   {/* Segment 4: Completed Jobs */}
                   <div
-                    onClick={() => setActiveTab("jobs")}
+                    onClick={openDashboardJobs}
                     style={{
                       padding: "16px 20px",
                       borderRight: "1px solid #E2E8F0",
@@ -1208,7 +1215,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                       </span>
                     </div>
                     <div style={{ fontSize: "24px", fontWeight: 800, color: "#15803D", lineHeight: 1.1 }}>
-                      {statsLoading ? "—" : stats?.completed_jobs ?? 20}
+                      {statsLoading ? "—" : stats?.completed_jobs ?? "—"}
                     </div>
                     <div style={{ fontSize: "11px", color: "#64748B", marginTop: "4px" }}>
                       Successfully signed off
@@ -1217,7 +1224,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
 
                   {/* Segment 5: Cancelled Jobs */}
                   <div
-                    onClick={() => setActiveTab("jobs")}
+                    onClick={openDashboardJobs}
                     style={{
                       padding: "16px 20px",
                       borderRight: "1px solid #E2E8F0",
@@ -1239,7 +1246,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                       </span>
                     </div>
                     <div style={{ fontSize: "24px", fontWeight: 800, color: "#B91C1C", lineHeight: 1.1 }}>
-                      {statsLoading ? "—" : stats?.cancelled_jobs ?? 15}
+                      {statsLoading ? "—" : stats?.cancelled_jobs ?? "—"}
                     </div>
                     <div style={{ fontSize: "11px", color: "#64748B", marginTop: "4px" }}>
                       Discontinued requests
@@ -1269,7 +1276,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                       </span>
                     </div>
                     <div style={{ fontSize: "24px", fontWeight: 800, color: "#065F46", lineHeight: 1.1 }}>
-                      {statsLoading ? "—" : stats?.total_organizations || orgs.length || 14}
+                      {statsLoading ? "—" : stats?.total_organizations ?? orgs.length}
                     </div>
                     <div style={{ fontSize: "11px", color: "#64748B", marginTop: "4px" }}>
                       Verified partner tenants
@@ -1277,427 +1284,33 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                   </div>
                 </div>
 
-                {/* 2-Column Visual Charts Section */}
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
-                    gap: "24px",
-                  }}
-                >
-                  {/* Left Column: Visual Revenue & Dispatch Trajectory Chart */}
-                  <div
-                    style={{
-                      background: "#F8FAFC",
-                      borderRadius: "16px",
-                      border: "1px solid #E2E8F0",
-                      padding: "20px 22px",
-                      display: "flex",
-                      flexDirection: "column",
-                      justifyContent: "space-between",
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
-                      <div>
-                        <div style={{ fontSize: "14px", fontWeight: 700, color: "#0F172A" }}>
-                          Revenue & Dispatch Growth Trend
-                        </div>
-                        <div style={{ fontSize: "12px", color: "#64748B" }}>
-                          Cumulative throughput and settled payments
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: "12px", fontSize: "11px", fontWeight: 600 }}>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", color: "#059669" }}>
-                          <span style={{ width: "10px", height: "3px", background: "#10B981", borderRadius: "2px" }} />
-                          Revenue (₹)
-                        </span>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", color: "#2563EB" }}>
-                          <span style={{ width: "10px", height: "3px", background: "#3B82F6", borderRadius: "2px" }} />
-                          Jobs Count
-                        </span>
-                      </div>
+                {/* Verified payment summary and organization comparison */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "18px", marginBottom: "28px" }}>
+                  <div style={{ background: "#FFFFFF", border: "1px solid #E2E8F0", borderRadius: "16px", padding: "20px" }}>
+                    <h3 style={{ margin: "0 0 6px", fontSize: "15px", color: "#0F172A" }}>Payment reconciliation</h3>
+                    <p style={{ margin: "0 0 16px", fontSize: "12px", color: "#64748B" }}>Closure totals and persisted payment status records for the selected scope.</p>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                      <div><div style={{ fontSize: "11px", color: "#64748B" }}>Recorded closure value</div><strong style={{ fontSize: "20px", color: "#0F766E" }}>{statsLoading ? "—" : `₹${(stats?.raw_payment_amount || 0).toLocaleString("en-IN")}`}</strong></div>
+                      <div><div style={{ fontSize: "11px", color: "#64748B" }}>Subtotal with successful status</div><strong style={{ fontSize: "20px", color: "#15803D" }}>{statsLoading ? "—" : `₹${(stats?.collected_payment_amount || 0).toLocaleString("en-IN")}`}</strong></div>
+                      <div><div style={{ fontSize: "11px", color: "#64748B" }}>Subtotal with pending status</div><strong style={{ fontSize: "18px", color: "#B45309" }}>{statsLoading ? "—" : `₹${(stats?.pending_payment_amount || 0).toLocaleString("en-IN")}`}</strong></div>
+                      <div><div style={{ fontSize: "11px", color: "#64748B" }}>Closures with status</div><strong style={{ fontSize: "18px", color: "#334155" }}>{statsLoading ? "—" : `${stats?.payment_status_records || 0} / ${stats?.payment_records || 0}`}</strong></div>
                     </div>
-
-                    {/* SVG Interactive Area Chart */}
-                    {(() => {
-                      const seriesMap: Record<string, { period: string; jobs: number; revenue: number; completed: number }[]> = {
-                        "30d": [
-                          { period: "Week 1", jobs: 38, revenue: 32500, completed: 5 },
-                          { period: "Week 2", jobs: 54, revenue: 47200, completed: 8 },
-                          { period: "Week 3", jobs: 62, revenue: 58000, completed: 12 },
-                          { period: "Week 4", jobs: 63, revenue: 42300, completed: stats?.completed_jobs || 20 },
-                        ],
-                        "90d": [
-                          { period: "Sep", jobs: 142, revenue: 118000, completed: 14 },
-                          { period: "Oct", jobs: 185, revenue: 152000, completed: 18 },
-                          { period: "Nov (Current)", jobs: stats?.total_jobs || 217, revenue: 180000, completed: stats?.completed_jobs || 20 },
-                        ],
-                        "all": [
-                          { period: "Jun", jobs: 45, revenue: 42000, completed: 4 },
-                          { period: "Jul", jobs: 82, revenue: 78000, completed: 8 },
-                          { period: "Aug", jobs: 120, revenue: 112000, completed: 12 },
-                          { period: "Sep", jobs: 156, revenue: 142000, completed: 15 },
-                          { period: "Oct", jobs: 189, revenue: 165000, completed: 18 },
-                          { period: "Nov", jobs: stats?.total_jobs || 217, revenue: 180000, completed: stats?.completed_jobs || 20 },
-                        ],
-                      };
-
-                      const series = seriesMap[analyticsTimeframe] || seriesMap["30d"];
-                      const maxRevenue = Math.max(...series.map((d) => d.revenue)) * 1.15 || 200000;
-                      const maxJobs = Math.max(...series.map((d) => d.jobs)) * 1.15 || 250;
-                      const width = 540;
-                      const height = 180;
-                      const padLeft = 45;
-                      const padRight = 20;
-                      const padTop = 15;
-                      const padBottom = 28;
-                      const plotW = width - padLeft - padRight;
-                      const plotH = height - padTop - padBottom;
-
-                      const revPoints = series.map((d, i) => {
-                        const x = padLeft + (i / Math.max(1, series.length - 1)) * plotW;
-                        const y = padTop + plotH - (d.revenue / maxRevenue) * plotH;
-                        return { x, y, data: d };
-                      });
-
-                      const jobsPoints = series.map((d, i) => {
-                        const x = padLeft + (i / Math.max(1, series.length - 1)) * plotW;
-                        const y = padTop + plotH - (d.jobs / maxJobs) * plotH;
-                        return { x, y, data: d };
-                      });
-
-                      const revAreaD = `
-                        M ${revPoints[0].x} ${padTop + plotH}
-                        ${revPoints.map((p) => `L ${p.x} ${p.y}`).join(" ")}
-                        L ${revPoints[revPoints.length - 1].x} ${padTop + plotH}
-                        Z
-                      `;
-
-                      const revLineD = `M ${revPoints.map((p) => `${p.x} ${p.y}`).join(" L ")}`;
-                      const jobsLineD = `M ${jobsPoints.map((p) => `${p.x} ${p.y}`).join(" L ")}`;
-
-                      const activeHover = hoveredTrendIndex !== null ? series[hoveredTrendIndex] : null;
-
-                      return (
-                        <div style={{ position: "relative" }}>
-                          {activeHover && (
-                            <div
-                              style={{
-                                position: "absolute",
-                                top: "8px",
-                                right: "12px",
-                                background: "#FFFFFF",
-                                border: "1px solid #CBD5E1",
-                                borderRadius: "8px",
-                                padding: "6px 12px",
-                                boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
-                                fontSize: "11px",
-                                zIndex: 10,
-                                pointerEvents: "none",
-                              }}
-                            >
-                              <strong style={{ color: "#0F172A", display: "block" }}>{activeHover.period}</strong>
-                              <span style={{ color: "#059669", fontWeight: 700 }}>₹{activeHover.revenue.toLocaleString("en-IN")}</span>
-                              <span style={{ color: "#64748B" }}> • {activeHover.jobs} jobs ({activeHover.completed} closed)</span>
-                            </div>
-                          )}
-
-                          <svg
-                            viewBox={`0 0 ${width} ${height}`}
-                            style={{ width: "100%", height: "auto", display: "block", overflow: "visible" }}
-                          >
-                            <defs>
-                              <linearGradient id="analyticsRevGrad" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="0%" stopColor="#10B981" stopOpacity="0.35" />
-                                <stop offset="100%" stopColor="#10B981" stopOpacity="0.0" />
-                              </linearGradient>
-                            </defs>
-
-                            {/* Horizontal Gridlines */}
-                            {[0, 0.33, 0.66, 1].map((pct, idx) => {
-                              const y = padTop + plotH * pct;
-                              const revVal = Math.round(((1 - pct) * maxRevenue) / 1000);
-                              return (
-                                <g key={idx}>
-                                  <line
-                                    x1={padLeft}
-                                    y1={y}
-                                    x2={width - padRight}
-                                    y2={y}
-                                    stroke="#E2E8F0"
-                                    strokeDasharray="4 4"
-                                    strokeWidth="1"
-                                  />
-                                  <text
-                                    x={padLeft - 8}
-                                    y={y + 3}
-                                    textAnchor="end"
-                                    fill="#94A3B8"
-                                    fontSize="10"
-                                    fontWeight="600"
-                                  >
-                                    ₹{revVal}K
-                                  </text>
-                                </g>
-                              );
-                            })}
-
-                            {/* Shaded Area */}
-                            <path d={revAreaD} fill="url(#analyticsRevGrad)" />
-
-                            {/* Revenue Line */}
-                            <path
-                              d={revLineD}
-                              fill="none"
-                              stroke="#10B981"
-                              strokeWidth="2.5"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-
-                            {/* Jobs Line */}
-                            <path
-                              d={jobsLineD}
-                              fill="none"
-                              stroke="#3B82F6"
-                              strokeWidth="2"
-                              strokeDasharray="4 3"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-
-                            {/* Data points & X-axis Labels */}
-                            {revPoints.map((p, idx) => (
-                              <g
-                                key={idx}
-                                onMouseEnter={() => setHoveredTrendIndex(idx)}
-                                onMouseLeave={() => setHoveredTrendIndex(null)}
-                                style={{ cursor: "pointer" }}
-                              >
-                                <circle
-                                  cx={p.x}
-                                  cy={p.y}
-                                  r={hoveredTrendIndex === idx ? 6 : 4}
-                                  fill="#FFFFFF"
-                                  stroke="#10B981"
-                                  strokeWidth="2.5"
-                                  style={{ transition: "all 0.15s ease" }}
-                                />
-                                <circle
-                                  cx={jobsPoints[idx].x}
-                                  cy={jobsPoints[idx].y}
-                                  r={hoveredTrendIndex === idx ? 5 : 3}
-                                  fill="#FFFFFF"
-                                  stroke="#3B82F6"
-                                  strokeWidth="2"
-                                />
-                                <text
-                                  x={p.x}
-                                  y={height - 8}
-                                  textAnchor="middle"
-                                  fill={hoveredTrendIndex === idx ? "#0F172A" : "#64748B"}
-                                  fontSize="10"
-                                  fontWeight={hoveredTrendIndex === idx ? "700" : "500"}
-                                >
-                                  {p.data.period}
-                                </text>
-                              </g>
-                            ))}
-                          </svg>
-                        </div>
-                      );
-                    })()}
+                    <button type="button" onClick={() => { setJobsOrgFilter(dashboardOrgFilter); setJobsPeriod(analyticsTimeframe); setJobsPage(1); setActiveTab("jobs"); }} style={{ marginTop: "16px", padding: "8px 12px", borderRadius: "8px", border: "1px solid #CBD5E1", background: "#F8FAFC", color: "#0F172A", cursor: "pointer", fontWeight: 600 }}>Review job payment records</button>
                   </div>
-
-                  {/* Right Column: Service Domain & Category Share */}
-                  <div
-                    style={{
-                      background: "#F8FAFC",
-                      borderRadius: "16px",
-                      border: "1px solid #E2E8F0",
-                      padding: "20px 22px",
-                      display: "flex",
-                      flexDirection: "column",
-                      justifyContent: "space-between",
-                    }}
-                  >
-                    <div>
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
-                        <div>
-                          <div style={{ fontSize: "14px", fontWeight: 700, color: "#0F172A" }}>
-                            Service Domain Share
-                          </div>
-                          <div style={{ fontSize: "12px", color: "#64748B" }}>
-                            Dispatch volume breakdown by engineering trade
-                          </div>
-                        </div>
-                        <span
-                          style={{
-                            fontSize: "11px",
-                            fontWeight: 700,
-                            padding: "3px 9px",
-                            borderRadius: "12px",
-                            background: "#ECFDF5",
-                            color: "#059669",
-                          }}
-                        >
-                          5 Active Domains
-                        </span>
-                      </div>
-
-                      {/* Service Progress Bars */}
-                      <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                        {[
-                          { name: "Electrical & Power Systems", pct: 38, count: 82, color: "#D97706", icon: <Zap size={14} color="#D97706" /> },
-                          { name: "HVAC & Air Conditioning", pct: 26, count: 56, color: "#0284C7", icon: <Wind size={14} color="#0284C7" /> },
-                          { name: "Plumbing & Piping", pct: 18, count: 39, color: "#2563EB", icon: <Droplets size={14} color="#2563EB" /> },
-                          { name: "CCTV & Security Systems", pct: 11, count: 24, color: "#059669", icon: <ShieldCheck size={14} color="#059669" /> },
-                          { name: "Appliance & Electronics", pct: 7, count: 16, color: "#EA580C", icon: <Cpu size={14} color="#EA580C" /> },
-                        ].map((cat, idx) => (
-                          <div key={idx}>
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: "12px", marginBottom: "4px" }}>
-                              <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", fontWeight: 600, color: "#1E293B" }}>
-                                {cat.icon}
-                                {cat.name}
-                              </span>
-                              <span style={{ color: "#64748B", fontWeight: 700 }}>
-                                {cat.count} jobs <span style={{ color: "#94A3B8" }}>({cat.pct}%)</span>
-                              </span>
-                            </div>
-                            <div style={{ height: "6px", borderRadius: "3px", background: "#E2E8F0", overflow: "hidden" }}>
-                              <div
-                                style={{
-                                  width: `${cat.pct}%`,
-                                  height: "100%",
-                                  borderRadius: "3px",
-                                  backgroundColor: cat.color,
-                                  transition: "width 0.4s ease",
-                                }}
-                              />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div
-                      style={{
-                        marginTop: "16px",
-                        padding: "10px 14px",
-                        borderRadius: "10px",
-                        background: "#FFFFFF",
-                        border: "1px solid #E2E8F0",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        fontSize: "12px",
-                      }}
-                    >
-                      <span style={{ color: "#64748B" }}>First-Claim Winner Allocation</span>
-                      <strong style={{ color: "#059669", fontWeight: 700 }}>Instant Postgre Lock (42s avg)</strong>
+                  <div style={{ background: "#FFFFFF", border: "1px solid #E2E8F0", borderRadius: "16px", padding: "20px" }}>
+                    <h3 style={{ margin: "0 0 6px", fontSize: "15px", color: "#0F172A" }}>Organization comparison</h3>
+                    <p style={{ margin: "0 0 12px", fontSize: "12px", color: "#64748B" }}>Lifetime closure totals from each organization. Select one above to inspect its filtered job metrics.</p>
+                    <div style={{ maxHeight: "190px", overflowY: "auto" }}>
+                      {orgs.length ? orgs.map((org) => (
+                        <button key={org.id} type="button" onClick={() => setDashboardOrgFilter(org.id)} style={{ width: "100%", display: "flex", justifyContent: "space-between", gap: "12px", padding: "9px 0", border: 0, borderBottom: "1px solid #F1F5F9", background: "transparent", textAlign: "left", cursor: "pointer" }}>
+                          <span style={{ color: "#334155", fontSize: "12px", fontWeight: 600 }}>{org.name}<small style={{ display: "block", color: "#94A3B8", fontWeight: 400 }}>{org.job_count} jobs • {org.completed_job_count || 0} completed</small></span>
+                          <strong style={{ color: "#0F766E", fontSize: "12px", whiteSpace: "nowrap" }}>{org.total_revenue || "—"}</strong>
+                        </button>
+                      )) : <div style={{ padding: "16px 0", color: "#64748B", fontSize: "13px" }}>Organization data is unavailable.</div>}
                     </div>
                   </div>
                 </div>
-              </div>
 
-              {/* ──────────────────────────────────────────────
-                  RICH OPERATIONAL CANVAS (Filled with Real Platform Telemetry)
-                 ────────────────────────────────────────────── */}
-              
-              {/* Section 1: Live Dispatch Lifecycle Pipeline */}
-              <div
-                style={{
-                  background: "#FFFFFF",
-                  borderRadius: "20px",
-                  border: "1px solid #E2E8F0",
-                  padding: "24px 28px",
-                  boxShadow: "0 4px 16px -2px rgba(0, 0, 0, 0.04)",
-                  marginBottom: "28px",
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "20px", flexWrap: "wrap", gap: "12px" }}>
-                  <div>
-                    <h3 style={{ fontSize: "18px", fontWeight: 700, color: "#0F172A", margin: 0, display: "flex", alignItems: "center", gap: "10px" }}>
-                      <Activity size={20} color="#059669" />
-                      Live Dispatch Pipeline & SLA Telemetry
-                    </h3>
-                    <p style={{ fontSize: "13px", color: "#64748B", margin: "4px 0 0 0" }}>
-                      Real-time progression of customer tickets across all partner organization networks
-                    </p>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12px", fontWeight: 600, color: "#059669", background: "#ECFDF5", padding: "6px 12px", borderRadius: "20px" }}>
-                      <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#10B981" }} />
-                      Auto-Sync Active (5s)
-                    </span>
-                  </div>
-                </div>
-
-                {/* Multi-Stage Visual Pipeline */}
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-                    gap: "14px",
-                    marginBottom: "20px",
-                  }}
-                >
-                  {[
-                    { label: "Created / New", count: stats?.active_jobs ? Math.max(1, Math.round(stats.active_jobs * 0.31)) : 57, color: "#3B82F6", bg: "#EFF6FF", desc: "Incoming requests" },
-                    { label: "Queued & Match", count: stats?.active_jobs ? Math.max(1, Math.round(stats.active_jobs * 0.54)) : 99, color: "#F59E0B", bg: "#FFFBEB", desc: "In technician queue" },
-                    { label: "Assigned & Route", count: stats?.active_jobs ? Math.max(1, Math.round(stats.active_jobs * 0.08)) : 14, color: "#8B5CF6", bg: "#F5F3FF", desc: "En route to site" },
-                    { label: "On-Site / Progress", count: stats?.active_jobs ? Math.max(1, Math.round(stats.active_jobs * 0.07)) : 12, color: "#10B981", bg: "#ECFDF5", desc: "Active servicing" },
-                    { label: "Completed", count: stats?.completed_jobs ?? 20, color: "#16A34A", bg: "#F0FDF4", desc: "Signed & closed" },
-                    { label: "Cancelled", count: stats?.cancelled_jobs ?? 15, color: "#EF4444", bg: "#FEF2F2", desc: "Customer cancelled" },
-                  ].map((stage, idx) => (
-                    <div
-                      key={idx}
-                      style={{
-                        background: stage.bg,
-                        borderRadius: "14px",
-                        border: `1px solid ${stage.color}25`,
-                        padding: "16px",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "6px",
-                      }}
-                    >
-                      <div style={{ fontSize: "11px", fontWeight: 700, textTransform: "uppercase", color: stage.color, letterSpacing: "0.04em" }}>
-                        {stage.label}
-                      </div>
-                      <div style={{ fontSize: "24px", fontWeight: 800, color: "#0F172A", lineHeight: 1 }}>
-                        {stage.count}
-                      </div>
-                      <div style={{ fontSize: "11px", color: "#64748B" }}>
-                        {stage.desc}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Proportional Progress Distribution Bar */}
-                {(() => {
-                  const total = stats?.total_jobs || 217;
-                  const active = stats?.active_jobs || 182;
-                  const completed = stats?.completed_jobs || 20;
-                  const cancelled = stats?.cancelled_jobs || 15;
-                  const activePct = ((active / total) * 100).toFixed(1);
-                  const compPct = ((completed / total) * 100).toFixed(1);
-                  const cancPct = ((cancelled / total) * 100).toFixed(1);
-                  return (
-                    <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", color: "#64748B", marginBottom: "8px" }}>
-                        <span>Fleet Workload Distribution</span>
-                        <span>{activePct}% Active • {compPct}% Closed • {cancPct}% Cancelled</span>
-                      </div>
-                      <div style={{ height: "10px", borderRadius: "6px", background: "#E2E8F0", overflow: "hidden", display: "flex" }}>
-                        <div style={{ width: `${activePct}%`, background: "#F59E0B", transition: "width 0.4s ease" }} title={`Active: ${active}`} />
-                        <div style={{ width: `${compPct}%`, background: "#10B981", transition: "width 0.4s ease" }} title={`Completed: ${completed}`} />
-                        <div style={{ width: `${cancPct}%`, background: "#EF4444", transition: "width 0.4s ease" }} title={`Cancelled: ${cancelled}`} />
-                      </div>
-                    </div>
-                  );
-                })()}
               </div>
 
               {/* Section 2: Partner Organizations Capacity & Fleet Table */}
@@ -1741,7 +1354,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                     onMouseEnter={(e) => (e.currentTarget.style.background = "#F8FAFC")}
                     onMouseLeave={(e) => (e.currentTarget.style.background = "#FFFFFF")}
                   >
-                    <span>View All ({orgs.length || stats?.total_organizations || 14})</span>
+                    <span>View All ({stats?.total_organizations ?? orgs.length})</span>
                     <ArrowRight size={14} />
                   </button>
                 </div>
@@ -1945,12 +1558,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                 ? selectedOrgDetail.services
                 : orgJobs.length > 0
                 ? Array.from(new Set(orgJobs.map((j) => j.service_type).filter(Boolean)))
-                : [
-                    "HVAC & Air Conditioning",
-                    "Electrical & Power Systems",
-                    "Plumbing & Piping",
-                    "General Facility Maintenance",
-                  ];
+                : [];
 
             const filteredOrgJobs = orgJobs.filter((job) => {
               if (orgJobsStatusFilter !== "ALL") {
@@ -1979,14 +1587,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
               return true;
             });
 
-            const orgCompletedJobs = orgJobs.filter(
-              (j) => ["COMPLETED", "CLOSED"].includes((j.status || "").toUpperCase())
-            );
-            const calculatedOrgPayment = orgCompletedJobs.reduce((sum, j) => sum + (j.payment_amount || 0), 0);
-            const formattedOrgPayment =
-              selectedOrgDetail.total_payment ||
-              selectedOrgDetail.total_revenue ||
-              (calculatedOrgPayment > 0 ? `₹${calculatedOrgPayment.toLocaleString("en-IN")}` : "₹0");
+            const formattedOrgPayment = selectedOrgDetail.total_payment || selectedOrgDetail.total_revenue || "—";
 
             return (
               <div style={{ maxWidth: "1280px", margin: "0 auto" }}>
@@ -2301,10 +1902,10 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                         Total Jobs Assigned
                       </div>
                       <div style={{ fontSize: "24px", fontWeight: 800, color: "#0F172A", lineHeight: 1.1, marginBottom: "4px" }}>
-                        {orgJobs.length || selectedOrgDetail.job_count || (selectedOrgDetail as any).jobs_count || 0}
+                        {selectedOrgDetail.job_count}
                       </div>
                       <div style={{ fontSize: "12px", color: "#64748B" }}>
-                        {orgJobs.filter((j) => !["COMPLETED", "CLOSED", "CANCELLED", "CANCELED"].includes((j.status || "").toUpperCase())).length} active • {orgJobs.filter((j) => ["COMPLETED", "CLOSED"].includes((j.status || "").toUpperCase())).length} closed
+                        {selectedOrgDetail.active_job_count ?? "—"} active • {selectedOrgDetail.completed_job_count ?? "—"} completed • {selectedOrgDetail.cancelled_job_count ?? "—"} cancelled
                       </div>
                     </div>
                   </div>
@@ -2351,13 +1952,13 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: "11px", fontWeight: 700, textTransform: "uppercase", color: "#64748B", letterSpacing: "0.06em", marginBottom: "4px" }}>
-                        Payment / Revenue
+                        Recorded Closure Value
                       </div>
                       <div style={{ fontSize: "24px", fontWeight: 800, color: "#059669", lineHeight: 1.1, marginBottom: "4px" }}>
                         {formattedOrgPayment}
                       </div>
                       <div style={{ fontSize: "12px", color: "#64748B" }}>
-                        {orgCompletedJobs.length} completed jobs settled
+                        {selectedOrgDetail.completed_job_count ?? 0} completed jobs
                       </div>
                     </div>
                   </div>
@@ -2518,7 +2119,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                         border: "1px solid #A7F3D0",
                       }}
                     >
-                      {displayedServices.length} Active Services
+                      {displayedServices.length} Observed Services
                     </span>
                   </div>
 
@@ -2592,7 +2193,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                                 }}
                               >
                                 <CheckCircle2 size={11} />
-                                Certified Service
+                                Observed in job history
                               </span>
                               {serviceJobsCount > 0 && (
                                 <span style={{ fontSize: "11px", color: "#64748B", fontWeight: 500 }}>
@@ -2604,6 +2205,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                         </div>
                       );
                     })}
+                    {!displayedServices.length && <div style={{ padding: "16px", color: "#64748B", fontSize: "13px" }}>No service types are recorded for this organization yet.</div>}
                   </div>
                 </div>
 
@@ -2633,10 +2235,10 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                   >
                     <div>
                       <h2 style={{ fontSize: "16px", fontWeight: 800, color: "#0F172A", margin: "0 0 2px 0" }}>
-                        Organization Jobs ({orgJobs.length})
+                        Recent Organization Jobs ({orgJobs.length} of {selectedOrgDetail.job_count})
                       </h2>
                       <p style={{ fontSize: "12px", color: "#64748B", margin: 0 }}>
-                        Service tickets, repairs, and dispatches currently assigned to {selectedOrgDetail.name}
+                        Latest 200 job records for {selectedOrgDetail.name}; full job totals are shown in the organization metrics above.
                       </p>
                     </div>
 
@@ -2728,7 +2330,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                             <th style={{ padding: "12px 18px" }}>Technician</th>
                             <th style={{ padding: "12px 18px" }}>Priority</th>
                             <th style={{ padding: "12px 18px" }}>Status</th>
-                            <th style={{ padding: "12px 18px" }}>Payment</th>
+                            <th style={{ padding: "12px 18px" }}>Closure Subtotal / Payment Status</th>
                             <th style={{ padding: "12px 18px" }}>Date</th>
                           </tr>
                         </thead>
@@ -2871,31 +2473,8 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                                   </span>
                                 </td>
                                 <td style={{ padding: "14px 18px" }}>
-                                  {isCompleted ? (
-                                    <span
-                                      style={{
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        gap: "4px",
-                                        padding: "3px 10px",
-                                        borderRadius: "12px",
-                                        fontSize: "12px",
-                                        fontWeight: 700,
-                                        background: "#ECFDF5",
-                                        color: "#059669",
-                                        border: "1px solid #A7F3D0",
-                                        fontFamily: "monospace",
-                                      }}
-                                    >
-                                      {job.formatted_payment && job.formatted_payment !== "—"
-                                        ? job.formatted_payment
-                                        : job.payment_amount
-                                        ? `₹${job.payment_amount.toLocaleString("en-IN")}`
-                                        : "₹1,250"}
-                                    </span>
-                                  ) : (
-                                    <span style={{ color: "#94A3B8", fontSize: "13px" }}>—</span>
-                                  )}
+                                  <strong style={{ display: "block", color: job.payment_amount != null ? "#0F766E" : "#94A3B8", fontFamily: "monospace", fontSize: "12px" }}>{job.formatted_payment && job.formatted_payment !== "—" ? job.formatted_payment : "—"}</strong>
+                                  <small style={{ color: job.payment_status === "SUCCESSFUL" ? "#15803D" : job.payment_status === "PENDING" ? "#B45309" : "#64748B" }}>{job.payment_status || "UNAVAILABLE"}</small>
                                 </td>
                                 <td style={{ padding: "14px 18px", color: "#64748B", fontSize: "12px" }}>
                                   {job.preferred_service_date || (job.created_at ? new Date(job.created_at).toLocaleDateString() : "—")}
@@ -2988,8 +2567,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      setOrgsSearch("");
-                      setOrgsPage(1);
+                      setOrgSearch("");
                       void loadOrganizations();
                     }}
                     disabled={orgsLoading}
@@ -3704,7 +3282,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                     Platform Jobs ({jobsTotal})
                   </h1>
                   <p style={{ fontSize: "13px", color: "#64748B", margin: 0 }}>
-                    Overview of all field service jobs across all partner organizations ({jobsTotal} total jobs).
+                    Showing {jobsOrgFilter === "ALL" ? "all organizations" : orgs.find((org) => org.id === jobsOrgFilter)?.name || "selected organization"} for {jobsPeriod === "all" ? "all dates" : `the last ${jobsPeriod === "30d" ? "30" : "90"} days`} ({jobsTotal} matching jobs).
                   </p>
                 </div>
 
@@ -3800,6 +3378,20 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                     <option value="CLOSED">Closed</option>
                   </select>
 
+                  <select aria-label="Job date range" value={jobsPeriod} onChange={(e) => { setJobsPeriod(e.target.value as "30d" | "90d" | "all"); setJobsPage(1); }} style={{ padding: "8px 12px", fontSize: "13px", borderRadius: "8px", border: "1px solid #CBD5E1", background: "#FFFFFF", color: "#334155", cursor: "pointer", fontWeight: 500 }}>
+                    <option value="all">All dates</option>
+                    <option value="30d">Last 30 days</option>
+                    <option value="90d">Last 90 days</option>
+                  </select>
+
+                  <select aria-label="Payment status filter" value={jobsPaymentFilter} onChange={(e) => { setJobsPaymentFilter(e.target.value); setJobsPage(1); }} style={{ padding: "8px 12px", fontSize: "13px", borderRadius: "8px", border: "1px solid #CBD5E1", background: "#FFFFFF", color: "#334155", cursor: "pointer", fontWeight: 500 }}>
+                    <option value="ALL">All payment states</option>
+                    <option value="SUCCESSFUL">Successful</option>
+                    <option value="PENDING">Pending</option>
+                    <option value="FAILED">Failed</option>
+                    <option value="UNAVAILABLE">Unavailable / not recorded</option>
+                  </select>
+
                   {/* Refresh Button */}
                   <button
                     type="button"
@@ -3807,6 +3399,8 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                       setJobsSearch("");
                       setJobsOrgFilter("ALL");
                       setJobsStatusFilter("ALL");
+                      setJobsPaymentFilter("ALL");
+                      setJobsPeriod("all");
                       setJobsPage(1);
                       void loadJobs();
                     }}
@@ -3832,6 +3426,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
               </div>
 
               {/* Summary Metrics Pills */}
+              <div style={{ margin: "-8px 0 12px", color: "#64748B", fontSize: "12px" }}>Job status totals for the selected organization and date range; search and payment filters affect the table below.</div>
               <div
                 style={{
                   display: "flex",
@@ -3987,7 +3582,7 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
                           <th style={{ padding: "14px 18px" }}>Technician</th>
                           <th style={{ padding: "14px 18px" }}>Priority</th>
                           <th style={{ padding: "14px 18px" }}>Status</th>
-                          <th style={{ padding: "14px 18px" }}>Payment</th>
+                          <th style={{ padding: "14px 18px" }}>Closure Subtotal / Payment Status</th>
                           <th style={{ padding: "14px 18px" }}>Created</th>
                         </tr>
                       </thead>
@@ -4152,31 +3747,8 @@ export const HeadPortal: React.FC<HeadPortalProps> = ({
 
                               {/* Payment */}
                               <td style={{ padding: "14px 18px" }}>
-                                {isCompleted ? (
-                                  <span
-                                    style={{
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      gap: "4px",
-                                      padding: "3px 10px",
-                                      borderRadius: "12px",
-                                      fontSize: "12px",
-                                      fontWeight: 700,
-                                      background: "#ECFDF5",
-                                      color: "#059669",
-                                      border: "1px solid #A7F3D0",
-                                      fontFamily: "monospace",
-                                    }}
-                                  >
-                                    {job.formatted_payment && job.formatted_payment !== "—"
-                                      ? job.formatted_payment
-                                      : job.payment_amount
-                                      ? `₹${job.payment_amount.toLocaleString("en-IN")}`
-                                      : "₹1,250"}
-                                  </span>
-                                ) : (
-                                  <span style={{ color: "#94A3B8", fontSize: "13px" }}>—</span>
-                                )}
+                                <strong style={{ display: "block", color: job.payment_amount != null ? "#0F766E" : "#94A3B8", fontFamily: "monospace", fontSize: "12px" }}>{job.formatted_payment && job.formatted_payment !== "—" ? job.formatted_payment : "—"}</strong>
+                                <small style={{ color: job.payment_status === "SUCCESSFUL" ? "#15803D" : job.payment_status === "PENDING" ? "#B45309" : "#64748B" }}>{job.payment_status || "UNAVAILABLE"}</small>
                               </td>
 
                               {/* Created Date */}

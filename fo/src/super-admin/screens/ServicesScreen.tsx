@@ -251,6 +251,8 @@ export default function ServicesScreen() {
   const [selectedServiceType, setSelectedServiceType] = useState<TaxonomyServiceType | null>(null);
   const [activeCategory, setActiveCategory] = useState<TaxonomyCategory | null>(null);
   const [selectedIssuesByCategory, setSelectedIssuesByCategory] = useState<SelectionMap>({});
+  const [savedIssuesByCategory, setSavedIssuesByCategory] = useState<SelectionMap>({});
+  const [initializedCategoryKeys, setInitializedCategoryKeys] = useState<Set<string>>(() => new Set());
   const [serviceSearch, setServiceSearch] = useState('');
   const [categorySearch, setCategorySearch] = useState('');
   const [issueSearch, setIssueSearch] = useState('');
@@ -336,10 +338,34 @@ export default function ServicesScreen() {
     .filter((items) => items.length > 0).length;
   const selectedIssueCount = Object.values(selectedIssuesByCategory)
     .reduce((total, items) => total + items.length, 0);
+  const savedIssueCount = Object.values(savedIssuesByCategory)
+    .reduce((total, items) => total + items.length, 0);
+  const unsavedChangeCount = selectedServiceType
+    ? selectedServiceType.categories.reduce((total, category) => {
+        const selected = selectedIssuesByCategory[category.id] || [];
+        const saved = savedIssuesByCategory[category.id] || [];
+        const issueKeys = new Set([...selected, ...saved].map(normalizeCatalogValue));
+        return total + [...issueKeys].filter((key) =>
+          selected.some((issue) => normalizeCatalogValue(issue) === key) !==
+          saved.some((issue) => normalizeCatalogValue(issue) === key)
+        ).length;
+      }, 0)
+    : 0;
+
+  const getCategorySelectionState = (categoryId: string): 'saved' | 'unsaved' | 'unselected' => {
+    const selected = new Set((selectedIssuesByCategory[categoryId] || []).map(normalizeCatalogValue));
+    const saved = new Set((savedIssuesByCategory[categoryId] || []).map(normalizeCatalogValue));
+    const allKeys = new Set([...selected, ...saved]);
+    const hasUnsavedChanges = [...allKeys].some((key) => selected.has(key) !== saved.has(key));
+    if (hasUnsavedChanges) return 'unsaved';
+    return saved.size > 0 ? 'saved' : 'unselected';
+  };
 
   const chooseServiceType = (serviceType: TaxonomyServiceType) => {
     if (selectedServiceType?.id !== serviceType.id) {
-      setSelectedIssuesByCategory(savedIssuesForType(serviceType));
+      const saved = savedIssuesForType(serviceType);
+      setSelectedIssuesByCategory(saved);
+      setSavedIssuesByCategory(saved);
     }
     setSelectedServiceType(serviceType);
     setActiveCategory(null);
@@ -350,6 +376,15 @@ export default function ServicesScreen() {
   };
 
   const openCategory = (category: TaxonomyCategory) => {
+    if (!selectedServiceType) return;
+    const categoryKey = `${selectedServiceType.id}:${category.id}`;
+    if (!initializedCategoryKeys.has(categoryKey)) {
+      setSelectedIssuesByCategory((current) => ({
+        ...current,
+        [category.id]: [...category.issues],
+      }));
+      setInitializedCategoryKeys((current) => new Set(current).add(categoryKey));
+    }
     setActiveCategory(category);
     setIssueSearch('');
     setError('');
@@ -360,12 +395,28 @@ export default function ServicesScreen() {
     if (saving) return;
     setError('');
     if (step === 3) {
+      if (activeCategory && selectedServiceType) {
+        const categoryKey = `${selectedServiceType.id}:${activeCategory.id}`;
+        setSelectedIssuesByCategory((current) => ({
+          ...current,
+          [activeCategory.id]: [...(savedIssuesByCategory[activeCategory.id] || [])],
+        }));
+        setInitializedCategoryKeys((current) => new Set(current).add(categoryKey));
+      }
       setActiveCategory(null);
       setIssueSearch('');
       setStep(2);
       return;
     }
     if (step === 2) {
+      if (selectedServiceType) {
+        const saved = savedIssuesForType(selectedServiceType);
+        setSelectedIssuesByCategory(saved);
+        setSavedIssuesByCategory(saved);
+        setInitializedCategoryKeys(new Set(
+          selectedServiceType.categories.map((category) => `${selectedServiceType.id}:${category.id}`),
+        ));
+      }
       setActiveCategory(null);
       setCategorySearch('');
       setIssueSearch('');
@@ -395,6 +446,32 @@ export default function ServicesScreen() {
   const deselectAllIssues = () => {
     if (!activeCategory) return;
     setSelectedIssuesByCategory((current) => ({ ...current, [activeCategory.id]: [] }));
+  };
+
+  const selectAllCategoryIssues = () => {
+    if (!selectedServiceType) return;
+    setSelectedIssuesByCategory((current) => ({
+      ...current,
+      ...Object.fromEntries(selectedServiceType.categories.map((category) => [category.id, [...category.issues]])),
+    }));
+    setInitializedCategoryKeys((current) => {
+      const next = new Set(current);
+      selectedServiceType.categories.forEach((category) => next.add(`${selectedServiceType.id}:${category.id}`));
+      return next;
+    });
+  };
+
+  const deselectAllCategoryIssues = () => {
+    if (!selectedServiceType) return;
+    setSelectedIssuesByCategory((current) => ({
+      ...current,
+      ...Object.fromEntries(selectedServiceType.categories.map((category) => [category.id, []])),
+    }));
+    setInitializedCategoryKeys((current) => {
+      const next = new Set(current);
+      selectedServiceType.categories.forEach((category) => next.add(`${selectedServiceType.id}:${category.id}`));
+      return next;
+    });
   };
 
   const handleSave = async () => {
@@ -455,6 +532,7 @@ export default function ServicesScreen() {
       }
 
       await loadServices(true);
+      setSavedIssuesByCategory(selectedIssuesByCategory);
       Alert.alert(
         'Services saved',
         `Successfully saved ${selectedIssueCount} selected issues under "${selectedServiceType.name}".`,
@@ -477,6 +555,9 @@ export default function ServicesScreen() {
         <Text style={{ color: colors.muted, fontSize: 11 }}>{selectedCategoryCount} categories</Text>
         <Text style={{ color: colors.muted, fontSize: 11 }}>{selectedIssueCount} issues</Text>
       </View>
+      <Text style={{ color: unsavedChangeCount > 0 ? '#92400E' : '#047857', backgroundColor: unsavedChangeCount > 0 ? '#FFF7E6' : '#ECFDF5', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7, fontSize: 10, fontWeight: '800' }}>
+        {savedIssueCount} saved · {unsavedChangeCount === 0 ? 'No unsaved changes' : `${unsavedChangeCount} unsaved ${unsavedChangeCount === 1 ? 'change' : 'changes'}`}
+      </Text>
     </View>
   );
 
@@ -623,24 +704,35 @@ export default function ServicesScreen() {
                 <Pill label={`${selectedServiceType.categories.length} categories`} tone="green" />
               </View>
               <SearchField value={categorySearch} onChangeText={setCategorySearch} placeholder="Search categories…" />
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 7 }}>
+                <PrimaryButton title="Select All Issues" compact variant="secondary" onPress={selectAllCategoryIssues} disabled={saving} />
+                <PrimaryButton title="Deselect All Issues" compact variant="ghost" onPress={deselectAllCategoryIssues} disabled={saving} />
+              </View>
               {renderWizardSummary()}
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 12 }}>
                 {visibleCategories.map((category) => {
                   const selectedCount = (selectedIssuesByCategory[category.id] || []).length;
+                  const selectionState = getCategorySelectionState(category.id);
                   const imagePath = getCategoryCardImage(category.id, selectedServiceType.id);
                   return (
                     <Card
                       key={category.id}
                       onPress={() => openCategory(category)}
-                      style={{ width: '48.5%', padding: 0, overflow: 'hidden', gap: 0, borderColor: selectedCount > 0 ? '#3ABF32' : '#D8E8D4', borderWidth: selectedCount > 0 ? 1.5 : 1, borderRadius: 19, backgroundColor: 'rgba(255,255,255,0.95)', elevation: 2 }}
+                      style={{ width: '48.5%', padding: 0, overflow: 'hidden', gap: 0, borderColor: selectionState === 'saved' ? '#059669' : selectionState === 'unsaved' ? '#F59E0B' : '#CBD5E1', borderWidth: selectionState === 'unselected' ? 1 : 2, borderRadius: 19, backgroundColor: selectionState === 'saved' ? '#ECFDF5' : selectionState === 'unsaved' ? '#FFF7E6' : 'rgba(255,255,255,0.95)', elevation: 2 }}
                     >
                       <View style={{ height: 112, position: 'relative' }}>
                         <CatalogRemoteImage path={imagePath} style={{ flex: 1 }} />
-                        {selectedCount > 0 ? <SelectionBadge count={selectedCount} /> : null}
+                        {selectionState !== 'unselected' ? (
+                          <View style={{ position: 'absolute', top: 8, right: 8, borderRadius: 99, backgroundColor: selectionState === 'saved' ? '#059669' : '#FDE68A', paddingHorizontal: 8, paddingVertical: 5 }}>
+                            <Text style={{ color: selectionState === 'saved' ? colors.white : '#854D0E', fontSize: 9, fontWeight: '900' }}>
+                              {selectionState === 'saved' ? `${selectedCount} saved` : selectedCount > 0 ? `${selectedCount} unsaved` : 'Removal pending'}
+                            </Text>
+                          </View>
+                        ) : null}
                       </View>
                       <View style={{ padding: 10, gap: 5, minHeight: 68 }}>
                         <Text numberOfLines={3} style={{ color: colors.ink, fontSize: 11, lineHeight: 15, fontWeight: '900' }}>{category.name}</Text>
-                        <Text style={{ color: selectedCount > 0 ? colors.forest : colors.muted, fontSize: 9, fontWeight: '800' }}>{selectedCount > 0 ? `${selectedCount} selected` : `${category.issues.length} issues`}</Text>
+                        <Text style={{ color: selectionState === 'saved' ? '#047857' : selectionState === 'unsaved' ? '#92400E' : colors.muted, fontSize: 9, fontWeight: '800' }}>{selectionState === 'saved' ? `${selectedCount} saved` : selectionState === 'unsaved' ? (selectedCount > 0 ? `${selectedCount} unsaved` : 'Removal pending') : `${category.issues.length} issues`}</Text>
                       </View>
                     </Card>
                   );
@@ -673,25 +765,47 @@ export default function ServicesScreen() {
                   <PrimaryButton title="Deselect All" compact variant="ghost" onPress={deselectAllIssues} disabled={saving} />
                 </View>
               </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                  <View style={{ width: 18, height: 18, borderRadius: 5, borderWidth: 1, borderColor: '#059669', backgroundColor: '#D1FAE5', alignItems: 'center', justifyContent: 'center' }}><Check size={12} color="#047857" strokeWidth={3} /></View>
+                  <Text style={{ color: colors.ink, fontSize: 9, fontWeight: '800' }}>Selected & saved</Text>
+                </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                  <View style={{ width: 18, height: 18, borderRadius: 5, borderWidth: 1, borderColor: '#F59E0B', backgroundColor: '#FEF3C7', alignItems: 'center', justifyContent: 'center' }}><Check size={12} color="#B45309" strokeWidth={3} /></View>
+                  <Text style={{ color: colors.ink, fontSize: 9, fontWeight: '800' }}>Selected · unsaved</Text>
+                </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                  <View style={{ width: 18, height: 18, borderRadius: 5, borderWidth: 1, borderColor: '#CBD5E1', backgroundColor: '#FFFFFF' }} />
+                  <Text style={{ color: colors.ink, fontSize: 9, fontWeight: '800' }}>Not selected</Text>
+                </View>
+              </View>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 11 }}>
                 {visibleIssues.map((issue) => {
                   const selected = (selectedIssuesByCategory[activeCategory.id] || [])
                     .some((item) => normalizeCatalogValue(item) === normalizeCatalogValue(issue));
+                  const saved = (savedIssuesByCategory[activeCategory.id] || [])
+                    .some((item) => normalizeCatalogValue(item) === normalizeCatalogValue(issue));
+                  const selectionState = selected ? (saved ? 'saved' : 'unsaved') : 'unselected';
                   const imagePath = getIssueCardImage(issue, activeCategory.id, selectedServiceType.id, activeCategory.issues.indexOf(issue));
                   return (
                     <Card
                       key={issue}
                       onPress={() => toggleIssue(issue)}
-                      style={{ width: '48.5%', padding: 0, overflow: 'hidden', gap: 0, borderColor: selected ? '#3ABF32' : '#D8E8D4', borderWidth: selected ? 2 : 1, borderRadius: 19, backgroundColor: 'rgba(255,255,255,0.95)', elevation: 2 }}
+                      style={{ width: '48.5%', padding: 0, overflow: 'hidden', gap: 0, borderColor: selectionState === 'saved' ? '#059669' : selectionState === 'unsaved' ? '#F59E0B' : '#CBD5E1', borderWidth: selectionState === 'unselected' ? 1 : 2, borderRadius: 19, backgroundColor: selectionState === 'saved' ? '#ECFDF5' : selectionState === 'unsaved' ? '#FFF7E6' : '#FFFFFF', elevation: 2 }}
                     >
                       <View style={{ height: 112, position: 'relative' }}>
                         <CatalogRemoteImage path={imagePath} style={{ flex: 1 }} />
-                        <View style={{ position: 'absolute', top: 7, right: 7, width: 24, height: 24, borderRadius: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: selected ? colors.green : 'rgba(255,255,255,0.96)', borderWidth: 1, borderColor: selected ? colors.green : '#94A3B8' }}>
+                        <View style={{ position: 'absolute', top: 7, right: 7, width: 24, height: 24, borderRadius: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: selected ? (saved ? '#059669' : '#F59E0B') : 'rgba(255,255,255,0.96)', borderWidth: 1, borderColor: selectionState === 'saved' ? '#059669' : selectionState === 'unsaved' ? '#F59E0B' : '#94A3B8' }}>
                           {selected ? <Check size={15} color={colors.white} strokeWidth={3} /> : null}
                         </View>
                       </View>
-                      <View style={{ minHeight: 64, padding: 10, justifyContent: 'center' }}>
+                      <View style={{ minHeight: 64, padding: 10, justifyContent: 'center', gap: 6 }}>
                         <Text style={{ color: colors.ink, fontSize: 10, lineHeight: 14, fontWeight: '800' }}>{issue}</Text>
+                        {selectionState !== 'unselected' ? (
+                          <View style={{ alignSelf: 'flex-start', borderRadius: 99, paddingHorizontal: 8, paddingVertical: 4, backgroundColor: selectionState === 'saved' ? '#059669' : '#FDE68A' }}>
+                            <Text style={{ color: selectionState === 'saved' ? colors.white : '#854D0E', fontSize: 8, fontWeight: '900', letterSpacing: 0.3 }}>{selectionState === 'saved' ? 'SAVED' : 'UNSAVED'}</Text>
+                          </View>
+                        ) : null}
                       </View>
                     </Card>
                   );
@@ -706,10 +820,10 @@ export default function ServicesScreen() {
       {step !== 1 ? renderWizardSummary() : null}
       {step !== 1 ? (
         <PrimaryButton
-          title={saving ? 'Saving services…' : `Save ${selectedIssueCount} selected issues`}
+          title={saving ? 'Saving services…' : 'Save changes'}
           onPress={() => void handleSave()}
           loading={saving}
-          disabled={loading || !selectedServiceType}
+          disabled={loading || !selectedServiceType || unsavedChangeCount === 0}
         />
       ) : (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, padding: 12, borderRadius: 13, backgroundColor: '#F3F8F5' }}>

@@ -8,6 +8,11 @@ export interface PlatformHeadStats {
   cancelled_jobs: number;
   total_payment: string;
   raw_payment_amount: number;
+  collected_payment_amount: number;
+  pending_payment_amount: number;
+  payment_records: number;
+  payment_status_records: number;
+  period: string;
 }
 
 export interface PlatformOrganization {
@@ -27,6 +32,8 @@ export interface PlatformOrganization {
   technician_count?: number;
   job_count: number;
   completed_job_count?: number;
+  active_job_count?: number;
+  cancelled_job_count?: number;
   total_revenue?: string;
   total_payment?: string;
   raw_revenue?: number;
@@ -34,8 +41,8 @@ export interface PlatformOrganization {
   created_at?: string | null;
 }
 
-export async function getPlatformHeadStats(): Promise<PlatformHeadStats> {
-  const response = await api.get<PlatformHeadStats>("/organizations/platform-stats");
+export async function getPlatformHeadStats(params?: { tenant_id?: string; period?: "30d" | "90d" | "all" }): Promise<PlatformHeadStats> {
+  const response = await api.get<PlatformHeadStats>("/organizations/platform-stats", { params });
   return response.data;
 }
 
@@ -68,6 +75,7 @@ export interface PlatformJobItem {
   technician_name: string;
   payment_amount?: number | null;
   formatted_payment?: string;
+  payment_status?: string;
   location: string;
   preferred_service_date?: string | null;
   created_at?: string | null;
@@ -87,7 +95,9 @@ export interface PlatformJobsResponse {
 export async function getPlatformJobs(params?: {
   search?: string;
   status?: string;
+  payment_status?: string;
   tenant_id?: string;
+  period?: "30d" | "90d" | "all";
   page?: number;
   limit?: number;
 }): Promise<PlatformJobsResponse> {
@@ -95,7 +105,9 @@ export async function getPlatformJobs(params?: {
     params: {
       search: params?.search || undefined,
       status: params?.status && params.status !== "ALL" ? params.status : undefined,
+      payment_status: params?.payment_status && params.payment_status !== "ALL" ? params.payment_status : undefined,
       tenant_id: params?.tenant_id && params.tenant_id !== "ALL" ? params.tenant_id : undefined,
+      period: params?.period || "all",
       page: params?.page || 1,
       limit: params?.limit || 15,
     },

@@ -23,6 +23,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -247,23 +248,37 @@ def _authenticate_password(
     matching_users = (
         db.query(User)
         .filter(
-            User.email == normalized_username,
+            func.lower(User.email) == normalized_username,
             User.deleted_at.is_(None),
         )
-        .limit(2)
         .all()
     )
 
-    # Never choose an account arbitrarily when legacy data contains
-    # duplicate email addresses across organizations/accounts.
+    # Older provisioning paths allowed the same email in different
+    # organizations. Resolve those legacy accounts only when the supplied
+    # password matches exactly one account; never select one arbitrarily.
     if len(matching_users) > 1:
-        raise GrantError(
-            "invalid_grant",
-            "Multiple accounts use this email address. Contact support.",
-            status.HTTP_401_UNAUTHORIZED,
-        )
-
-    user = matching_users[0] if matching_users else None
+        password_matches = [
+            candidate
+            for candidate in matching_users
+            if verify_password(password, candidate.password_hash)
+        ]
+        if len(password_matches) == 1:
+            user = password_matches[0]
+        elif len(password_matches) > 1:
+            raise GrantError(
+                "invalid_grant",
+                "Multiple accounts match these credentials. Contact support.",
+                status.HTTP_401_UNAUTHORIZED,
+            )
+        else:
+            raise GrantError(
+                "invalid_grant",
+                "Invalid credentials",
+                status.HTTP_401_UNAUTHORIZED,
+            )
+    else:
+        user = matching_users[0] if matching_users else None
 
     # Keep unknown/inactive accounts on the generic authentication
     # response, but return a distinct lockout response for an account

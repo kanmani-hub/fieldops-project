@@ -12,11 +12,10 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import Feather from "@expo/vector-icons/Feather";
 import { customerApi } from "../../../src/customer/api/customer";
 import type { ServiceCatalogItem } from "../../../src/customer/types/api";
-import { useFocusedAutoRefresh } from "../../../src/customer/hooks/useFocusedAutoRefresh";
 import { SERVICE_CATALOGUE_TAXONOMY, type TaxonomyServiceType } from "../../../src/customer/data/serviceCatalogueTaxonomy";
 
 const ASSETS =
@@ -117,6 +116,7 @@ function catalogItemMatchesIssue(
 
 export default function CustomerHomeScreen() {
   const router = useRouter();
+  const [profileLocation, setProfileLocation] = useState("Set service location");
   const [searchText, setSearchText] = useState("");
   const [serviceCatalog, setServiceCatalog] = useState<ServiceCatalogItem[]>([]);
   const [catalogLoaded, setCatalogLoaded] = useState(false);
@@ -138,7 +138,24 @@ export default function CustomerHomeScreen() {
     void refreshCatalog();
   }, [refreshCatalog]);
 
-  useFocusedAutoRefresh(refreshCatalog);
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      void customerApi.profile().then((profile) => {
+        if (!active) return;
+        const cityAndState = [profile.city, profile.state]
+          .map((part) => part?.trim())
+          .filter(Boolean)
+          .join(", ");
+        const address = [profile.address, profile.pincode]
+          .map((part) => part?.trim())
+          .filter(Boolean)
+          .join(", ");
+        setProfileLocation(cityAndState || address || "Set service location");
+      }).catch(() => undefined);
+      return () => { active = false; };
+    }, []),
+  );
 
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -163,19 +180,15 @@ export default function CustomerHomeScreen() {
     () => CATEGORIES.filter((category) => (categoryCounts[category.id] ?? 0) > 0),
     [categoryCounts],
   );
+  // Show the bundled category list on first paint while the remote catalog loads.
+  // Once it arrives, replace this quick-start list with only bookable categories.
+  const displayedCategories = catalogLoaded && !catalogLoadFailed
+    ? availableCategories
+    : CATEGORIES;
 
-  const openRequests = (params?: {
-    category?: string;
-    search?: string;
-  }) => {
+  const openRequests = () => {
     router.push({
       pathname: "/customer/(tabs)/requests",
-      params: {
-        ...(params?.category
-          ? { category: params.category }
-          : {}),
-        ...(params?.search ? { search: params.search } : {}),
-      },
     } as never);
   };
 
@@ -190,7 +203,10 @@ export default function CustomerHomeScreen() {
       return;
     }
 
-    openRequests({ search: query });
+    router.push({
+      pathname: "/customer/requests/new",
+      params: { search: query },
+    } as never);
   };
 
   const handleCategoryPress = (category: ServiceCategory) => {
@@ -249,7 +265,7 @@ export default function CustomerHomeScreen() {
                 style={styles.locationText}
                 numberOfLines={1}
               >
-                Chennai, Tamil Nadu
+                {profileLocation}
               </Text>
 
               <Feather
@@ -360,14 +376,12 @@ export default function CustomerHomeScreen() {
 
         {/* Two-column image card grid */}
         <View style={styles.categoryGrid}>
-          {!catalogLoaded ? (
-            <Text style={styles.catalogMessage}>Loading available services…</Text>
-          ) : catalogLoadFailed ? (
+          {catalogLoaded && catalogLoadFailed ? (
             <Text style={styles.catalogMessage}>Could not load available services. Pull to refresh and try again.</Text>
-          ) : availableCategories.length === 0 ? (
+          ) : catalogLoaded && availableCategories.length === 0 ? (
             <Text style={styles.catalogMessage}>No services are currently available to book.</Text>
           ) : null}
-          {catalogLoaded && !catalogLoadFailed && availableCategories.map((category) => (
+          {displayedCategories.map((category) => (
             <Pressable
               key={category.id}
               style={({ pressed }) => [
@@ -413,7 +427,7 @@ export default function CustomerHomeScreen() {
                   ]}
                 >
                   {!catalogLoaded
-                    ? "Loading services"
+                    ? "Browse services"
                     : catalogLoadFailed
                       ? "Unavailable"
                       : `${categoryCounts[category.id]} ${categoryCounts[category.id] === 1 ? "Service" : "Services"} Available`}

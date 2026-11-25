@@ -580,6 +580,17 @@ async def get_technician_profile(
     ).first()
 
     user = db.query(User).filter(User.id == current_user.user_id, User.tenant_id == current_user.tenant_id,).first()
+    technician = db.query(Technician).filter(
+        Technician.tenant_id == current_user.tenant_id,
+        Technician.tech_id == current_user.user_id,
+    ).first()
+    mobile_number = (
+        (profile.mobile_number or "").strip() if profile else ""
+    ) or (
+        (user.phone_number or "").strip() if user else ""
+    ) or (
+        (technician.phone_number or "").strip() if technician else ""
+    )
 
     if not profile:
 
@@ -595,7 +606,7 @@ async def get_technician_profile(
 
             full_name=user.full_name if user else "",
 
-            mobile_number=(user.phone_number if user and user.phone_number else ""),
+            mobile_number=mobile_number,
 
             profile_completed=False,
 
@@ -633,7 +644,7 @@ async def get_technician_profile(
 
         profile_photo=profile.profile_photo,
 
-        mobile_number=profile.mobile_number,
+        mobile_number=mobile_number,
 
         date_of_birth=profile.date_of_birth,
 

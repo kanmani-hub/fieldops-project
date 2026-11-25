@@ -13,8 +13,9 @@ import {
   RefreshCw,
   UsersRound,
 } from "lucide-react";
-import dispatcherService, { Dispatcher } from "../../services/dispatcherService";
+import dispatcherService, { Dispatcher, setDispatcherActive } from "../../services/dispatcherService";
 import dispatcherBanner from "../../assets/dispatcher-banner.png";
+import ConfirmationDialog from "../../components/ui/ConfirmationDialog";
 
 const REFRESH_MS = 30000;
 
@@ -559,6 +560,12 @@ export default function DispatcherPage() {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<Dispatcher | null>(null);
   const [openActionsId, setOpenActionsId] = useState<string | null>(null);
+  const [deactivationTarget, setDeactivationTarget] = useState<Dispatcher | null>(null);
+  const [updatingDispatcherId, setUpdatingDispatcherId] = useState<string | null>(null);
+  const [showDeactivatedDispatchers, setShowDeactivatedDispatchers] = useState(false);
+  const visibleDispatchers = dispatchers.filter((dispatcher) =>
+    showDeactivatedDispatchers ? !dispatcher.is_active : dispatcher.is_active,
+  );
 
   const fetchDispatchers = useCallback(async (silent = false) => {
     try {
@@ -595,6 +602,29 @@ export default function DispatcherPage() {
     setOpenActionsId(null);
   };
 
+  const updateDispatcherActiveStatus = async (dispatcher: Dispatcher, isActive: boolean) => {
+    setUpdatingDispatcherId(dispatcher.id);
+    setOpenActionsId(null);
+    try {
+      await setDispatcherActive(dispatcher.id, isActive);
+      const updated = {
+        ...dispatcher,
+        is_active: isActive,
+        is_on_duty: isActive ? dispatcher.is_on_duty : false,
+      };
+      setDispatchers((current) => current.map((item) => item.id === dispatcher.id ? updated : item));
+      setSelected((current) => current?.id === dispatcher.id ? updated : current);
+    } catch (err: any) {
+      window.alert(
+        err?.response?.data?.detail ||
+          err?.response?.data?.error ||
+          "Could not update dispatcher status.",
+      );
+    } finally {
+      setUpdatingDispatcherId(null);
+    }
+  };
+
   const infoRows = (dispatcher: Dispatcher) => [
     { label: "Email", value: dispatcher.email || "—", Icon: Mail },
     { label: "Phone", value: dispatcher.phone_number || "—", Icon: Phone },
@@ -607,6 +637,28 @@ export default function DispatcherPage() {
   return (
     <div className="dispatcher-page">
       <style>{localCss}</style>
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h1 style={{ margin: 0, color: "#173d2b", fontSize: 20, fontWeight: 800 }}>
+            {showDeactivatedDispatchers ? "Deactivated Dispatchers" : "Dispatchers"} ({visibleDispatchers.length})
+          </h1>
+          <p style={{ margin: "4px 0 0", color: "#64748b", fontSize: 13 }}>
+            {showDeactivatedDispatchers
+              ? "Inactive dispatchers can be reactivated when the organization has no active dispatcher."
+              : "Select a dispatcher to view account details."}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowDeactivatedDispatchers((current) => !current)}
+          style={{ minHeight: 36, padding: "0 12px", border: "1px solid #dce9e2", borderRadius: 9, background: showDeactivatedDispatchers ? "#e9f5ed" : "#fff", color: "#315840", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+        >
+          {showDeactivatedDispatchers
+            ? `Active Dispatchers (${dispatchers.filter((dispatcher) => dispatcher.is_active).length})`
+            : `Deactivated Dispatchers (${dispatchers.filter((dispatcher) => !dispatcher.is_active).length})`}
+        </button>
+      </div>
 
       {loading && (
         <div className="dispatcher-state" role="status">Loading dispatchers…</div>
@@ -623,11 +675,13 @@ export default function DispatcherPage() {
         </div>
       )}
 
-      {!loading && !error && dispatchers.length === 0 && (
-        <div className="dispatcher-state">No dispatcher found.</div>
+      {!loading && !error && visibleDispatchers.length === 0 && (
+        <div className="dispatcher-state">
+          {showDeactivatedDispatchers ? "No deactivated dispatchers found." : "No active dispatcher found."}
+        </div>
       )}
 
-      {!loading && !error && dispatchers.map((dispatcher) => (
+      {!loading && !error && visibleDispatchers.map((dispatcher) => (
         <article className="dispatcher-profile-card" key={dispatcher.id}>
           <header
             className="dispatcher-banner has-custom-art"
@@ -679,6 +733,16 @@ export default function DispatcherPage() {
                   <div className="dispatcher-actions-menu" role="menu">
                     <button type="button" role="menuitem" onClick={() => openDetails(dispatcher)}>
                       <Eye size={16} /> View full details
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={updatingDispatcherId === dispatcher.id}
+                      onClick={() => dispatcher.is_active
+                        ? (setDeactivationTarget(dispatcher), setOpenActionsId(null))
+                        : void updateDispatcherActiveStatus(dispatcher, true)}
+                    >
+                      {dispatcher.is_active ? "Deactivate dispatcher" : "Reactivate dispatcher"}
                     </button>
                     <button
                       type="button"
@@ -781,6 +845,24 @@ export default function DispatcherPage() {
           </aside>
         </>
       )}
+
+      <ConfirmationDialog
+        open={deactivationTarget !== null}
+        title="Deactivate dispatcher?"
+        message={deactivationTarget
+          ? `Deactivate “${deactivationTarget.name || "Dispatcher"}”? They will lose access to this organization. Their record and history will be kept and they can be reactivated later.`
+          : ""}
+        confirmLabel="Deactivate"
+        busyLabel="Deactivating…"
+        busy={deactivationTarget !== null && updatingDispatcherId === deactivationTarget.id}
+        onConfirm={async () => {
+          if (!deactivationTarget) return;
+          const target = deactivationTarget;
+          await updateDispatcherActiveStatus(target, false);
+          setDeactivationTarget(null);
+        }}
+        onCancel={() => setDeactivationTarget(null)}
+      />
     </div>
   );
 }

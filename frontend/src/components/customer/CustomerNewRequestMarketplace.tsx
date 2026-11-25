@@ -387,6 +387,12 @@ export default function CustomerNewRequestMarketplace({
   const [selectedServiceType, setSelectedServiceType] = useState<TaxonomyServiceType | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<TaxonomyCategory | null>(null);
   const [selectedIssue, setSelectedIssue] = useState<string>("");
+  const [bookingClock, setBookingClock] = useState(() => new Date());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setBookingClock(new Date()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Category and Issue filtering switches: ALL | ACTIVE | INACTIVE
   const [unavailableModalIssue, setUnavailableModalIssue] = useState<string | null>(null);
@@ -401,7 +407,7 @@ export default function CustomerNewRequestMarketplace({
       isSelectable: boolean;
     }[] = [];
 
-    const now = new Date();
+    const now = bookingClock;
     for (let i = 0; i < 5; i++) {
       const d = new Date(now);
       d.setDate(now.getDate() + i);
@@ -428,7 +434,7 @@ export default function CustomerNewRequestMarketplace({
       });
     }
     return options;
-  }, []);
+  }, [bookingClock]);
 
   // Priority Options
   const PRIORITY_OPTIONS = [
@@ -703,19 +709,19 @@ export default function CustomerNewRequestMarketplace({
   // Handle Search Submission in Hero Banner
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const query = searchQuery.trim().toLowerCase();
+    const query = normalize(searchQuery.trim());
     if (!query) {
       setNoServicesModalName("All Services");
       return;
     }
 
-    // Match query with active items in catalog
+    // Search every active service field so service type, category, issue,
+    // and descriptive terms all lead to the matching booking flow.
     const matchingItem = catalogItems.find(
       (it) =>
         it.is_active &&
-        (it.issue.toLowerCase().includes(query) ||
-          it.category.toLowerCase().includes(query) ||
-          it.service_type.toLowerCase().includes(query))
+        [it.service_type, it.category, it.issue, it.description]
+          .some((value) => normalize(value).includes(query))
     );
 
     if (matchingItem) {
@@ -742,7 +748,10 @@ export default function CustomerNewRequestMarketplace({
     // If query matches a taxonomy category name directly
     for (const st of SERVICE_CATALOGUE_TAXONOMY) {
       for (const cat of st.categories) {
-        if (cat.name.toLowerCase().includes(query)) {
+        if (
+          normalize(cat.name).includes(query) &&
+          getActiveCountForCategory(st, cat) > 0
+        ) {
           setSelectedServiceType(st);
           handleCategoryClick(cat);
           return;
@@ -891,6 +900,7 @@ export default function CustomerNewRequestMarketplace({
     const now = new Date();
     const todayStr = formatLocalDateStr(now);
     const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    const tomorrowStr = formatLocalDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
     if (preferredDate === todayStr) {
       if (now.getHours() >= 19) {
         addToast({
@@ -908,6 +918,13 @@ export default function CustomerNewRequestMarketplace({
         );
         return;
       }
+    }
+    if (nowMinutes >= 20 * 60 && preferredDate === tomorrowStr && parseSlotMinutes(preferredTimeSlot) < 11 * 60) {
+      showValidationToast(
+        "Bookings made after 8:00 PM must use a slot from 11:00 AM tomorrow onward.",
+        "Slot Unavailable",
+      );
+      return;
     }
 
     if (!locationAddress.trim()) {
@@ -2205,6 +2222,8 @@ export default function CustomerNewRequestMarketplace({
                     const todayStr = formatLocalDateStr(now);
                     const nowMinutes = now.getHours() * 60 + now.getMinutes();
                     const minTodayMinutes = nowMinutes + 180;
+                    const tomorrowStr = formatLocalDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
+                    const overnightBooking = nowMinutes >= 20 * 60;
                     const todaySlotsAvailable =
                       now.getHours() < 19 &&
                       TIME_SLOTS.some(
@@ -2227,7 +2246,7 @@ export default function CustomerNewRequestMarketplace({
                               <span style={{ color: "#EF4444" }}>*</span>
                             </label>
                             <span style={{ fontSize: "12.5px", color: "#64748B" }}>
-                              Choose Today (when available) or any of the next 4 available days.
+                              {overnightBooking ? "Bookings after 8:00 PM can be scheduled tomorrow from 11:00 AM onward." : "Choose Today (when available) or any of the next 4 available days."}
                             </span>
                           </div>
 
@@ -2264,6 +2283,14 @@ export default function CustomerNewRequestMarketplace({
                                       opt.isToday &&
                                       preferredTimeSlot &&
                                       parseSlotMinutes(preferredTimeSlot) < minTodayMinutes
+                                    ) {
+                                      setPreferredTimeSlot("");
+                                    }
+                                    if (
+                                      overnightBooking &&
+                                      opt.dateStr === tomorrowStr &&
+                                      preferredTimeSlot &&
+                                      parseSlotMinutes(preferredTimeSlot) < 11 * 60
                                     ) {
                                       setPreferredTimeSlot("");
                                     }
@@ -2379,7 +2406,8 @@ export default function CustomerNewRequestMarketplace({
                             {TIME_SLOTS.map((slot) => {
                               const slotDisabled =
                                 preferredDate === todayStr &&
-                                parseSlotMinutes(slot) < minTodayMinutes;
+                                parseSlotMinutes(slot) < minTodayMinutes ||
+                                (overnightBooking && preferredDate === tomorrowStr && parseSlotMinutes(slot) < 11 * 60);
                               const isSelected =
                                 !slotDisabled && preferredTimeSlot === slot;
                               return (
@@ -2392,7 +2420,9 @@ export default function CustomerNewRequestMarketplace({
                                       addToast({
                                         title: "Slot Unavailable",
                                         message:
-                                          "This time slot is unavailable for today. Please choose an available slot or select tomorrow's date.",
+                                          preferredDate === tomorrowStr && overnightBooking
+                                            ? "Bookings made after 8:00 PM must use a slot from 11:00 AM tomorrow onward."
+                                            : "This time slot is unavailable for today. Please choose an available slot or select tomorrow's date.",
                                         type: "warning",
                                       });
                                       return;
