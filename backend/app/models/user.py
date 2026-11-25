@@ -182,10 +182,6 @@ class User(Base):
         cascade="all, delete-orphan",
     )
 
-    organization = relationship(
-        "Organization",
-        back_populates="users",
-    )
 
     mfa = relationship(
         "MFA",

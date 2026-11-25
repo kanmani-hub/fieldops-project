@@ -438,19 +438,16 @@ async def get_customer_profile(
 
     profile = db.query(CustomerProfileModel).filter(
         CustomerProfileModel.user_id == current_user.user_id,
-        CustomerProfileModel.tenant_id == current_user.tenant_id,
     ).first()
 
     user = db.query(User).filter(
         User.id == current_user.user_id,
-        User.tenant_id == current_user.tenant_id,
     ).first()
 
     if not profile:
         return CustomerProfileResponse(
             id="",
             user_id=current_user.user_id,
-            tenant_id=current_user.tenant_id,
             full_name=user.full_name if user else "",
             mobile_number=user.phone_number if user else "",
             profile_completed=False,
@@ -462,7 +459,6 @@ async def get_customer_profile(
     return CustomerProfileResponse(
         id=profile.id,
         user_id=profile.user_id,
-        tenant_id=profile.tenant_id,
         full_name=profile.full_name,
         mobile_number=profile.mobile_number,
         address=profile.address,
@@ -494,7 +490,6 @@ async def create_customer_profile(
 
     existing = db.query(CustomerProfileModel).filter(
         CustomerProfileModel.user_id == current_user.user_id,
-        CustomerProfileModel.tenant_id == current_user.tenant_id,
     ).first()
 
     if existing:
@@ -506,7 +501,6 @@ async def create_customer_profile(
     profile = CustomerProfileModel(
         id=str(uuid.uuid4()),
         user_id=current_user.user_id,
-        tenant_id=current_user.tenant_id,
         full_name=data.full_name,
         mobile_number=data.mobile_number,
         address=data.address,
@@ -522,7 +516,6 @@ async def create_customer_profile(
     audit_log(
         db,
         action=AuditAction.PROFILE_CREATED,
-        tenant_id=current_user.tenant_id,
         user_id=current_user.user_id,
         role=current_user.role.value,
         entity_type="customer_profile",
@@ -538,13 +531,11 @@ async def create_customer_profile(
 
     user = db.query(User).filter(
         User.id == current_user.user_id,
-        User.tenant_id == current_user.tenant_id,
     ).first()
 
     return CustomerProfileResponse(
         id=profile.id,
         user_id=profile.user_id,
-        tenant_id=profile.tenant_id,
         full_name=profile.full_name,
         mobile_number=profile.mobile_number,
         address=profile.address,
@@ -575,7 +566,6 @@ async def update_customer_profile(
 
     profile = db.query(CustomerProfileModel).filter(
         CustomerProfileModel.user_id == current_user.user_id,
-        CustomerProfileModel.tenant_id == current_user.tenant_id,
     ).first()
 
     if not profile:
@@ -612,7 +602,6 @@ async def update_customer_profile(
         # Update the main customer User record.
         customer_user = db.query(User).filter(
             User.id == current_user.user_id,
-            User.tenant_id == current_user.tenant_id,
         ).first()
 
         if customer_user:
@@ -673,13 +662,11 @@ async def update_customer_profile(
 
     user = db.query(User).filter(
         User.id == current_user.user_id,
-        User.tenant_id == current_user.tenant_id,
     ).first()
 
     return CustomerProfileResponse(
         id=profile.id,
         user_id=profile.user_id,
-        tenant_id=profile.tenant_id,
         full_name=profile.full_name,
         mobile_number=profile.mobile_number,
         address=profile.address,
@@ -711,7 +698,6 @@ async def change_password(
 
     user = db.query(User).filter(
         User.id == current_user.user_id,
-        User.tenant_id == current_user.tenant_id,
     ).first()
 
     if not user:
@@ -915,7 +901,6 @@ async def create_service_request(
 
     user_rec = db.query(User).filter(
         User.id == current_user.user_id,
-        User.tenant_id == current_user.tenant_id,
     ).first()
 
     cust_first = (

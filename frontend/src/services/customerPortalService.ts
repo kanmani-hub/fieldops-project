@@ -11,7 +11,6 @@ import api from "./api";
 export interface CustomerProfile {
   id: string;
   user_id: string;
-  tenant_id: string;
   full_name: string;
   mobile_number: string;
   address: string | null;

@@ -27,7 +27,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, or_, cast, String
+from sqlalchemy import func, or_, cast, String, case
 
 
 from ..database import get_db
@@ -714,6 +714,71 @@ def get_platform_head_stats(
         "cancelled_jobs": cancelled_jobs,
         "total_payment": formatted_payment,
         "raw_payment_amount": revenue_amount,
+    }
+
+
+@org_router.get("/platform-performance")
+def get_platform_head_performance(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return lifetime payment and job outcome metrics for each real organization."""
+    user_role = str(getattr(current_user.role, "value", current_user.role) or "").lower()
+    if user_role not in {"head", "super_admin", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Platform performance is restricted to Platform Head operators.",
+        )
+
+    tenant_ids = list(get_platform_real_super_admins(db).keys())
+    if not tenant_ids:
+        return {"data": [], "totals": {"payment_amount": 0, "accepted_jobs": 0, "rejected_jobs": 0}}
+
+    organizations = (
+        db.query(Organization.id, Organization.name)
+        .filter(Organization.id.in_(tenant_ids), Organization.deleted_at.is_(None))
+        .all()
+    )
+    job_rows = (
+        db.query(
+            Job.tenant_id,
+            func.count(Job.id),
+            func.sum(case((func.upper(Job.status).in_(("ACCEPTED", "EN_ROUTE", "TRAVELING", "ON_SITE", "IN_PROGRESS", "COMPLETED", "CLOSED")), 1), else_=0)),
+            func.sum(case((or_(Job.status.is_(None), ~func.upper(Job.status).in_(("ACCEPTED", "EN_ROUTE", "TRAVELING", "ON_SITE", "IN_PROGRESS", "COMPLETED", "CLOSED"))), case((or_(Job.rejected_at.isnot(None), func.upper(Job.status).in_(("REJECTED", "REJECTED_BY_TECHNICIAN", "DECLINED"))), 1), else_=0)), else_=0)),
+        )
+        .filter(Job.tenant_id.in_(tenant_ids))
+        .group_by(Job.tenant_id)
+        .all()
+    )
+    closure_rows = (
+        db.query(JobClosure.tenant_id, func.sum(JobClosure.subtotal))
+        .filter(JobClosure.tenant_id.in_(tenant_ids), JobClosure.subtotal < 500000.0)
+        .group_by(JobClosure.tenant_id)
+        .all()
+    )
+    job_metrics = {row[0]: row for row in job_rows}
+    payments = {row[0]: float(row[1] or 0) for row in closure_rows}
+
+    data = []
+    for org_id, org_name in organizations:
+        metrics = job_metrics.get(org_id)
+        data.append({
+            "organization_id": org_id,
+            "organization_name": org_name,
+            "total_jobs": int(metrics[1] or 0) if metrics else 0,
+            "accepted_jobs": int(metrics[2] or 0) if metrics else 0,
+            "rejected_jobs": int(metrics[3] or 0) if metrics else 0,
+            "payment_amount": round(payments.get(org_id, 0), 2),
+        })
+
+    data.sort(key=lambda item: item["payment_amount"], reverse=True)
+    return {
+        "data": data,
+        "totals": {
+            "payment_amount": round(sum(item["payment_amount"] for item in data), 2),
+            "accepted_jobs": sum(item["accepted_jobs"] for item in data),
+            "rejected_jobs": sum(item["rejected_jobs"] for item in data),
+        },
     }
 
 

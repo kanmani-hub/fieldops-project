@@ -111,7 +111,6 @@ def seed_organizations_and_users(db: Session):
             "first_name": "Carl",
             "last_name": "Customer",
             "role": UserRole.CUSTOMER.value,
-            "tenant_id": "tenant-1",
         },
     ]
     for udata in seed_users_data:

@@ -3,6 +3,7 @@ export type AppRole =
   | "customer"
   | "technician"
   | "super_admin"
+  | "head"
   | "dispatcher";
 
 export interface AuthUser {
@@ -29,6 +30,8 @@ export function normalizeRole(value: unknown): AppRole | null {
     return "super_admin";
   }
 
+  if (role === "head") return "head";
+
   if (role === "dispatcher") return "dispatcher";
 
   return null;
@@ -40,6 +43,7 @@ export function homeRoute(
   | "/customer"
   | "/technician/(app)/dashboard"
   | "/super-admin/dashboard"
+  | "/head/dashboard"
   | null {
   switch (normalizeRole(role)) {
     case "customer":
@@ -51,6 +55,9 @@ export function homeRoute(
     case "super_admin":
     case "dispatcher":
       return "/super-admin/dashboard";
+
+    case "head":
+      return "/head/dashboard";
 
     default:
       return null;
