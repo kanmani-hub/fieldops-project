@@ -1234,7 +1234,8 @@ export const getUniqueIssueCardImage = (
 ): string => {
   const categoryFiles = ISSUE_IMAGE_FILES_BY_CATEGORY[serviceTypeId]?.[categoryId];
 
-  const fallbackPool = ISSUE_TRADE_POOLS[serviceTypeId] || DEFAULT_ISSUE_POOL;
+  const tradeFallbackPool = ISSUE_TRADE_POOLS[serviceTypeId];
+  const fallbackPool = tradeFallbackPool?.length ? tradeFallbackPool : DEFAULT_ISSUE_POOL;
 
   if (categoryFiles?.length) {
     if (index >= 0 && index < categoryFiles.length) {

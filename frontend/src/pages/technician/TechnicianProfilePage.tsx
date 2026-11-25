@@ -329,7 +329,10 @@ export default function TechnicianProfilePage({
         } else {
           setForm((f) => ({
             ...f,
-            full_name: user ? `${user.first_name} ${user.last_name}` : "",
+            full_name: p.full_name || (user ? `${user.first_name} ${user.last_name}` : ""),
+            mobile_number: String(p.mobile_number || "")
+              .replace(/\D/g, "")
+              .slice(0, 10),
           }));
         }
       })

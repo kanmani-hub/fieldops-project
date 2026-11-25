@@ -488,9 +488,19 @@ const formatSchedule = (job: any): string => {
 
   const time = job?.preferred_service_time;
 
-  if (date && time) return `${date} ${time}`;
+  const formatDate = (value: unknown): string => {
+    if (typeof value !== "string" || !value.trim()) return "";
+    const datePart = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (datePart) return `${datePart[3]}/${datePart[2]}/${datePart[1]}`;
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime())
+      ? value
+      : parsed.toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
+  };
 
-  return date || time || "N/A";
+  if (date && time) return `${formatDate(date)} ${time}`;
+
+  return (date ? formatDate(date) : "") || time || "N/A";
 
 };
 

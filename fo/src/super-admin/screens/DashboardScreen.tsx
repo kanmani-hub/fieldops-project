@@ -9,6 +9,9 @@ import type { AuthUser } from '../types';
 type Period = 'today' | 'week' | 'month' | 'all' | 'custom';
 const dayKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const isDateKey = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && (() => { const [year, month, day] = value.split('-').map(Number); return dayKey(new Date(year, month - 1, day)) === value; })();
+const normalizeJobStatus = (status: unknown) => String(status || '').toUpperCase().replace(/[^A-Z]/g, '');
+const isCompletedJob = (job: any) => ['COMPLETED', 'CLOSED'].includes(normalizeJobStatus(job.status));
+const isTerminalJob = (job: any) => ['COMPLETED', 'CLOSED', 'CANCELLED', 'CANCELED', 'REJECTEDBYTECHNICIAN'].includes(normalizeJobStatus(job.status));
 const rangeFor = (period: Period) => {
   const today = new Date();
   if (period === 'today') return { start_date: dayKey(today), end_date: dayKey(today) };
@@ -20,7 +23,7 @@ const money = (amount: unknown) => `₹${new Intl.NumberFormat('en-IN', { maximu
 
 export default function DashboardScreen({ user, onNavigate }: { user: AuthUser; onNavigate: (tab: string) => void }) {
   const { width: windowWidth } = useWindowDimensions();
-  const [data, setData] = useState<any>({ stats: {}, jobs: [], technicians: [] });
+  const [data, setData] = useState<any>({ stats: {}, jobs: [], technicians: [], services: [] });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -63,8 +66,6 @@ export default function DashboardScreen({ user, onNavigate }: { user: AuthUser; 
     { label: 'Completed', value: cards.completed ?? jobs.completed ?? 0, icon: <CheckCircle2 size={14} color={colors.forest} />, tone: 'green' as const, caption: 'Completed jobs' },
     { label: 'Payments', value: money((stats.payment_summary || {}).total_recorded), icon: <CreditCard size={14} color="#0D9488" />, tone: 'green' as const, caption: `Cash ${money((stats.payment_summary || {}).cash_total)} · UPI ${money((stats.payment_summary || {}).upi_total)}` },
   ];
-  const categories = stats.categories || stats.service_technicians || {};
-  const categoryRows = Object.entries(categories).filter(([, value]) => Number(value) > 0).sort((a, b) => Number(b[1]) - Number(a[1]));
   const activeRange = period === 'custom' ? customRange : rangeFor(period);
   const performance = useMemo(() => {
     const list = data.jobs || [];
@@ -77,11 +78,11 @@ export default function DashboardScreen({ user, onNavigate }: { user: AuthUser; 
     const createdDays = list.map((job: any) => keyOf(job.created_at)).filter(Boolean).sort();
     const start = activeRange ? new Date(`${activeRange.start_date}T00:00:00`) : createdDays.length ? new Date(`${createdDays[0]}T00:00:00`) : new Date(today.getFullYear(), today.getMonth(), today.getDate());
     const end = activeRange ? new Date(`${activeRange.end_date}T00:00:00`) : new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    const selectedDays = activeRange ? Math.floor((end.getTime() - start.getTime()) / 86400000) + 1 : 0;
+    const selectedDays = activeRange ? Math.round((end.getTime() - start.getTime()) / 86400000) + 1 : 0;
     const grouping = period === 'today' ? 'hourly' : activeRange ? selectedDays > 31 ? 'monthly' : 'daily' : 'monthly';
     const completionValue = (job: any) => {
       if (job.completed_at || job.closed_at) return job.completed_at || job.closed_at;
-      if (!['COMPLETED', 'CLOSED'].includes(String(job.status || '').toUpperCase())) return '';
+      if (!isCompletedJob(job)) return '';
       const updated = keyOf(job.updated_at);
       const updatedInRange = activeRange ? updated >= activeRange.start_date && updated <= activeRange.end_date : Boolean(updated);
       return updatedInRange ? job.updated_at : job.created_at || job.updated_at;
@@ -124,19 +125,70 @@ export default function DashboardScreen({ user, onNavigate }: { user: AuthUser; 
     const key = Number.isNaN(parsed.getTime()) ? String(raw).slice(0, 10) : dayKey(parsed);
     return key >= activeRange.start_date && key <= activeRange.end_date;
   }), [data.jobs, activeRange?.start_date, activeRange?.end_date]);
+  const categoryDefinitions = [
+    { match: ['hvac', 'hvac repair', 'ac hvac', 'air conditioning', 'refrigeration'], aliases: ['hvac', 'ac', 'air conditioning', 'refrigeration'], label: 'HVAC Repair' },
+    { match: ['electrical', 'electrician'], aliases: ['electrical', 'electrician'], label: 'Electrical' },
+    { match: ['plumbing', 'plumber'], aliases: ['plumbing', 'plumber'], label: 'Plumbing' },
+    { match: ['network', 'network support', 'it support'], aliases: ['network', 'it support'], label: 'Network Support' },
+    { match: ['general maintenance', 'maintenance'], aliases: ['maintenance'], label: 'General Maintenance' },
+    { match: ['appliance', 'appliance repair', 'home appliance', 'home appliances'], aliases: ['appliance'], label: 'Appliance Repair' },
+    { match: ['roofing', 'carpentry', 'roofing carpentry'], aliases: ['roofing', 'carpentry'], label: 'Roofing & Carpentry' },
+    { match: ['cctv', 'security', 'cctv security', 'security systems'], aliases: ['cctv', 'security'], label: 'CCTV & Security' },
+  ];
+  const normalizeService = (value: unknown) => String(value || '').toLowerCase().replace(/[_&-]/g, ' ').replace(/\s+/g, ' ').trim();
+  const canonicalServiceName = (value: string) => {
+    const normalized = normalizeService(value);
+    if (['home appliances', 'home appliance'].some(alias => normalized === alias || normalized.startsWith(`${alias} `))) return 'Home Appliance Repair';
+    if (['air conditioning refrigeration', 'air conditioning and refrigeration'].some(alias => normalized === alias || normalized.startsWith(`${alias} `))) return 'Air Conditioning and Refrigeration';
+    if (['cctv security systems', 'cctv and security systems'].some(alias => normalized === alias || normalized.startsWith(`${alias} `))) return 'CCTV and Security Systems';
+    return value.trim();
+  };
+  const activeServiceTypes = Array.from(new Map((data.services || [])
+    .filter((service: any) => service.is_active === true && String(service.service_type || '').trim())
+    .map((service: any) => {
+      const name = canonicalServiceName(String(service.service_type));
+      return [normalizeService(name), name] as const;
+    })).values());
+  const categoryRows = activeServiceTypes.map(label => {
+    const serviceType = normalizeService(label);
+    const definition = categoryDefinitions.find(category => category.match.some(term => normalizeService(term) === serviceType || serviceType.includes(normalizeService(term)) || normalizeService(term).includes(serviceType)));
+    const matchesJob = (job: any) => {
+      const jobType = normalizeService(job.service_type ? canonicalServiceName(String(job.service_type)) : '');
+      if (jobType) return jobType === serviceType || jobType.startsWith(`${serviceType} `);
+      const skill = normalizeService(job.required_skill);
+      return Boolean(definition?.aliases.some(term => skill.includes(normalizeService(term))));
+    };
+    return [label, scopedJobs.filter(matchesJob).length] as [string, number];
+  });
   const activeWithSla = scopedJobs.filter((job: any) => {
-    const status = String(job.status || '').toUpperCase().replace(/[^A-Z]/g, '');
-    const terminal = ['COMPLETED', 'CLOSED', 'CANCELLED', 'CANCELED', 'REJECTEDBYTECHNICIAN'].includes(status);
-    return !terminal && Boolean(job.sla_deadline) && Number.isFinite(new Date(job.sla_deadline).getTime());
+    return !isTerminalJob(job) && Boolean(job.sla_deadline) && Number.isFinite(new Date(job.sla_deadline).getTime());
   });
   const withinSla = activeWithSla.filter((job: any) => new Date(job.sla_deadline).getTime() >= Date.now()).length;
   const atRiskSla = activeWithSla.filter((job: any) => { const left = new Date(job.sla_deadline).getTime() - Date.now(); return left >= 0 && left <= 60 * 60 * 1000; }).length;
   const slaRate = activeWithSla.length ? Math.round(withinSla / activeWithSla.length * 100) : null;
   const topTechnicians = (data.technicians || []).map((technician: any) => {
-    const related = scopedJobs.filter((job: any) => Number(job.assigned_technician_id) === Number(technician.technician_id ?? technician.id));
-    const done = related.filter((job: any) => ['COMPLETED', 'CLOSED'].includes(String(job.status || '').toUpperCase())).length;
+    const related = scopedJobs.filter((job: any) => Number(job.assigned_technician_id) === Number(technician.technician_id));
+    const done = related.filter(isCompletedJob).length;
     return { name: technician.technician_name || technician.name || 'Technician', total: related.length, done, rate: related.length ? Math.round(done / related.length * 100) : 0 };
   }).filter((technician: any) => technician.total > 0).sort((a: any, b: any) => b.done - a.done || b.total - a.total).slice(0, 4);
+  const statusSegments = [
+    { label: 'Completed', value: Number(cards.completed ?? jobs.completed ?? 0), color: '#10B981' },
+    { label: 'Accepted', value: Number(cards.accepted ?? 0), color: '#2387F5' },
+    { label: 'In Progress', value: Number(cards.in_progress ?? 0), color: '#F59E0B' },
+    { label: 'En Route', value: Number(cards.en_route ?? 0), color: '#8B5CF6' },
+    { label: 'Unassigned', value: Number(cards.unassigned ?? jobs.pending ?? 0), color: '#EF4444' },
+    { label: 'Rejected', value: Number(cards.rejected ?? 0), color: '#F97316' },
+    { label: 'Cancelled', value: Number(jobs.cancelled ?? 0), color: '#64748B' },
+  ];
+  const statusTotal = statusSegments.reduce((sum, item) => sum + item.value, 0);
+  const technicianAvailability = stats.technicians || {};
+  const availabilityRows = [
+    { label: 'Available', value: Number(technicianAvailability.available || 0), color: '#10B981' },
+    { label: 'Busy', value: Number(technicianAvailability.busy || 0), color: '#F59E0B' },
+    { label: 'On break', value: Number(technicianAvailability.break || 0), color: '#8B5CF6' },
+    { label: 'Offline', value: Number(technicianAvailability.offline || 0), color: '#64748B' },
+  ];
+  const technicianTotal = availabilityRows.reduce((sum, item) => sum + item.value, 0);
   const periodOptions: { id: Period; label: string }[] = [{ id: 'today', label: 'Today' }, { id: 'week', label: 'This week' }, { id: 'month', label: 'This month' }, { id: 'all', label: 'All time' }, { id: 'custom', label: 'Custom' }];
   const applyMonthPreset = (months: number) => {
     const end = new Date();
@@ -202,6 +254,19 @@ export default function DashboardScreen({ user, onNavigate }: { user: AuthUser; 
     </View>
     {loading ? <View style={{ padding: 20 }}><Text style={{ textAlign: 'center', color: colors.muted }}>Loading operations metrics…</Text></View> : <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 6 }}>{metrics.map(item => <View key={item.label} style={{ width: '23.5%' }}><MetricCard {...item} compact backgroundColor="#FFFFFF" onPress={item.onPress} /></View>)}</View>}
 
+    <Card style={{ gap: 12 }}>
+      <SectionTitle title="Job status distribution" subtitle="Current status of jobs in the selected range" />
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 13 }}>
+        <View style={{ width: 78, height: 78, borderRadius: 40, borderWidth: 8, borderColor: statusTotal ? '#10B981' : '#E8EEF0', alignItems: 'center', justifyContent: 'center' }}>
+          <Text style={{ color: colors.ink, fontSize: 19, fontWeight: '900' }}>{total}</Text>
+          <Text style={{ color: colors.muted, fontSize: 8 }}>JOBS</Text>
+        </View>
+        <View style={{ flex: 1, gap: 7 }}>
+          {statusSegments.map(item => <View key={item.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}><View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: item.color }} /><Text style={{ flex: 1, color: colors.text, fontSize: 10 }}>{item.label}</Text><Text style={{ color: colors.ink, fontSize: 10, fontWeight: '800' }}>{item.value}</Text></View>)}
+        </View>
+      </View>
+    </Card>
+
     <Card style={{ padding: 0, overflow: 'hidden' }}>
       <View style={{ paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#EAF1ED', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9, flex: 1 }}>
@@ -238,7 +303,24 @@ export default function DashboardScreen({ user, onNavigate }: { user: AuthUser; 
 
     <Card style={{ gap: 12 }}>
       <SectionTitle title="Service category breakdown" subtitle="Jobs grouped by service category" />
-      {categoryRows.length ? categoryRows.slice(0, 8).map(([label, value]) => { const max = Math.max(...categoryRows.map(([, count]) => Number(count))); return <View key={label} style={{ gap: 6 }}><View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={{ color: colors.ink, fontSize: 12, fontWeight: '700', textTransform: 'capitalize' }}>{label}</Text><Text style={{ color: colors.muted, fontSize: 11, fontWeight: '800' }}>{Number(value)}</Text></View><View style={{ height: 7, borderRadius: 5, backgroundColor: '#EDF1EE', overflow: 'hidden' }}><View style={{ width: `${Math.max(3, Number(value) / max * 100)}%`, height: '100%', backgroundColor: colors.forest, borderRadius: 5 }} /></View></View>; }) : <Text style={{ color: colors.muted, fontSize: 12 }}>No category data available for this period.</Text>}
+      {categoryRows.length ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8 }}>{categoryRows.map(([label, value]) => {
+        const columns = Math.min(categoryRows.length, 3);
+        const tileWidth = `${(100 - (columns - 1) * 2.5) / columns}%` as `${number}%`;
+        const max = Math.max(1, ...categoryRows.map(([, count]) => Number(count)));
+        return <View key={label} style={{ width: tileWidth, maxWidth: categoryRows.length === 1 ? 160 : undefined, aspectRatio: 1, borderRadius: 999, borderWidth: 1, borderColor: '#B9E8D2', backgroundColor: '#F5FBF7', alignItems: 'center', justifyContent: 'center', padding: 8, gap: 5 }}>
+          <Text numberOfLines={3} adjustsFontSizeToFit style={{ color: colors.ink, fontSize: 10, lineHeight: 13, fontWeight: '800', textAlign: 'center' }}>{label}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}><Text style={{ color: colors.ink, fontSize: 20, lineHeight: 24, fontWeight: '900' }}>{Number(value)}</Text><Text style={{ color: colors.muted, fontSize: 8 }}>jobs</Text></View>
+          <View style={{ width: '70%', height: 4, borderRadius: 4, backgroundColor: '#E8EFEB', overflow: 'hidden' }}><View style={{ width: `${Math.max(Number(value) > 0 ? 4 : 0, Number(value) / max * 100)}%`, height: '100%', backgroundColor: colors.forest }} /></View>
+        </View>;
+      })}</View> : <Text style={{ color: colors.muted, fontSize: 12 }}>No active service types are configured for this organization.</Text>}
+    </Card>
+
+    <Card style={{ gap: 12 }}>
+      <SectionTitle title="Technician availability" subtitle="Current tenant technician status" />
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+        {availabilityRows.map(item => <View key={item.label} style={{ flex: 1, minWidth: '45%', padding: 11, borderRadius: 13, backgroundColor: '#F6FAF7', gap: 5 }}><View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}><View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: item.color }} /><Text style={{ color: colors.muted, fontSize: 10 }}>{item.label}</Text></View><Text style={{ color: colors.ink, fontSize: 17, fontWeight: '900' }}>{item.value}</Text></View>)}
+      </View>
+      <Text style={{ color: colors.muted, fontSize: 10 }}>Total technicians: {technicianTotal}</Text>
     </Card>
 
     <Card style={{ gap: 12 }}>

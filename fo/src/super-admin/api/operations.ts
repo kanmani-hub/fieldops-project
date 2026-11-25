@@ -106,26 +106,17 @@ export async function getDashboardData(
     ).toISOString();
   }
 
-  const [stats, kpi, jobs, techs] = await Promise.allSettled([
+  const [stats, jobs, techs, services] = await Promise.allSettled([
     api.get('/jobs/stats', { params }),
-    api.get('/planning/kpi'),
-    api.get('/jobs', {
-      params: { page: 1, limit: 8 },
-    }),
-    api.get('/technicians', {
-      params: { page: 1, limit: 100 },
-    }),
+    api.get('/jobs'),
+    api.get('/technicians'),
+    api.get('/api/admin/services'),
   ]);
 
   return {
     stats:
       stats.status === 'fulfilled'
         ? unwrap<any>(stats.value)
-        : {},
-
-    kpi:
-      kpi.status === 'fulfilled'
-        ? unwrap<any>(kpi.value)
         : {},
 
     jobs:
@@ -138,7 +129,12 @@ export async function getDashboardData(
         ? asArray(techs.value)
         : [],
 
-    errors: [stats, kpi, jobs, techs].filter(
+    services:
+      services.status === 'fulfilled'
+        ? asArray(services.value)
+        : [],
+
+    errors: [stats, jobs, techs].filter(
       x => x.status === 'rejected'
     ).length,
   };
@@ -314,6 +310,19 @@ export async function provisionTechnician(payload: {
 export async function getDispatchers() {
   return asArray(
     await api.get('/dispatchers')
+  );
+}
+
+export async function setDispatcherActive(
+  dispatcherId: string,
+  isActive: boolean,
+) {
+  const id = String(dispatcherId).trim();
+  if (!id) throw new Error('A valid dispatcher ID is required.');
+  return unwrap(
+    await api.patch(`/dispatchers/${encodeURIComponent(id)}/active`, {
+      is_active: isActive,
+    })
   );
 }
 

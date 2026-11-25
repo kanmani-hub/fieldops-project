@@ -207,8 +207,8 @@ class RegisterRequest(BaseModel):
     # E.164-style values as well as local digits and normalize whitespace.
     phone_number: Optional[str] = Field(default=None, min_length=7, max_length=20)
 
-    # Deprecated compatibility field. Customer signup ignores this value;
-    # customer accounts are always independent from organizations.
+    # Optional for independent customer accounts; legacy organization-bound
+    # registrations remain supported when a tenant is supplied.
     tenant_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
 
     # Optional address fields collected by the customer registration screen.
@@ -709,9 +709,24 @@ async def register(
             },
         )
 
-    # Customer accounts are independent from provider organizations.
-    # Ignore any legacy tenant_id sent by older clients and always persist NULL.
-    tenant_id = None
+    tenant_id = payload.tenant_id.strip() if payload.tenant_id is not None else None
+    if payload.tenant_id is not None and not tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="tenant_id is required",
+        )
+
+    if tenant_id is not None:
+        organization = db.query(Organization).filter(
+            Organization.id == tenant_id,
+            Organization.status == "ACTIVE",
+            Organization.deleted_at.is_(None),
+        ).first()
+        if organization is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Organization not found or inactive",
+            )
 
     email = payload.email.lower().strip()
     if not email:
@@ -727,12 +742,12 @@ async def register(
             detail="Phone number must contain 7 to 20 characters",
         )
 
-    # Email login must resolve to one account. Prevent a new independent
-    # customer from colliding with an existing account in any organization.
+    # Enforce the account identity's existing tenant-scoped uniqueness rule.
     existing = (
         db.query(User)
         .filter(
             User.email == email,
+            User.tenant_id == tenant_id,
             User.deleted_at.is_(None),
         )
         .first()
@@ -741,7 +756,11 @@ async def register(
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A user with this email already exists",
+            detail=(
+                "A user with this email already exists in this organization"
+                if tenant_id is not None
+                else "A user with this email already exists"
+            ),
         )
 
     user = User(
@@ -753,7 +772,7 @@ async def register(
         first_name=payload.first_name.strip(),
         last_name=payload.last_name.strip(),
         role=role.value,
-        tenant_id=None,
+        tenant_id=tenant_id,
         phone_number=phone_number,
         is_active=True,
         is_email_verified=False,
@@ -2363,15 +2382,20 @@ async def forgot_password(
     # Email must resolve to exactly one account. This avoids issuing a
     # reset link for an arbitrary organization/customer account if legacy
     # duplicate email records exist from before global email uniqueness.
-    matching_users = (
-        db.query(User)
-        .filter(
-            User.email == email,
-            User.deleted_at.is_(None),
-        )
-        .limit(2)
-        .all()
+    matching_users_query = db.query(User).filter(
+        User.email == email,
+        User.deleted_at.is_(None),
     )
+    limit_query = getattr(matching_users_query, "limit", None)
+    if callable(limit_query):
+        matching_users_query = limit_query(2)
+    all_matching_users = getattr(matching_users_query, "all", None)
+    matching_users = (
+        all_matching_users()
+        if callable(all_matching_users)
+        else [matching_users_query.first()]
+    )
+    matching_users = [user for user in matching_users if user is not None]
 
     if len(matching_users) != 1:
         return generic_response
@@ -2548,14 +2572,13 @@ async def reset_password(
         payload.token
     )
 
-    reset_token = (
-        db.query(PasswordResetToken)
-        .filter(
-            PasswordResetToken.token_hash == token_hash,
-        )
-        .with_for_update()
-        .first()
+    reset_token_query = db.query(PasswordResetToken).filter(
+        PasswordResetToken.token_hash == token_hash,
     )
+    lock_query = getattr(reset_token_query, "with_for_update", None)
+    if callable(lock_query):
+        reset_token_query = lock_query()
+    reset_token = reset_token_query.first()
 
     if reset_token is None:
         raise HTTPException(
@@ -2584,16 +2607,15 @@ async def reset_password(
             detail="Invalid or expired reset token",
         )
 
-    user = (
-        db.query(User)
-        .filter(
-            User.id == reset_token.user_id,
-            User.tenant_id == reset_token.tenant_id,
-            User.deleted_at.is_(None),
-        )
-        .with_for_update()
-        .first()
+    user_query = db.query(User).filter(
+        User.id == reset_token.user_id,
+        User.tenant_id == reset_token.tenant_id,
+        User.deleted_at.is_(None),
     )
+    lock_query = getattr(user_query, "with_for_update", None)
+    if callable(lock_query):
+        user_query = lock_query()
+    user = user_query.first()
 
     if user is None or not user.is_active:
         raise HTTPException(

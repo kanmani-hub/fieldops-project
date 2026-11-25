@@ -756,7 +756,7 @@ function AppInner() {
     useState<string | null>(null);
 
   const [customerLocation, setCustomerLocation] =
-    useState("Chennai, Tamil Nadu");
+    useState("Set service location");
 
   const [customerName, setCustomerName] = useState(() =>
     `${user?.first_name || ""} ${user?.last_name || ""}`.trim()
@@ -768,13 +768,15 @@ function AppInner() {
 
     const handleProfileData = (profile: any) => {
       if (!profile) return;
-      if (profile.city && profile.state) {
-        setCustomerLocation(`${profile.city}, ${profile.state}`);
-      } else if (profile.city) {
-        setCustomerLocation(profile.city);
-      } else if (profile.address) {
-        setCustomerLocation(profile.address);
-      }
+      const cityAndState = [profile.city, profile.state]
+        .map((part: unknown) => String(part ?? "").trim())
+        .filter(Boolean)
+        .join(", ");
+      const address = [profile.address, profile.pincode]
+        .map((part: unknown) => String(part ?? "").trim())
+        .filter(Boolean)
+        .join(", ");
+      setCustomerLocation(cityAndState || address || "Set service location");
 
       const updatedName =
         profile.full_name?.trim() ||

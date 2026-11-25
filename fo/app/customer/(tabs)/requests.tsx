@@ -25,7 +25,7 @@ import {
   StatusBadge,
 } from "../../../src/customer/components/ui";
 import type { CustomerJob, ServiceRequest } from "../../../src/customer/types/api";
-import { canCancelRequest, formatDate, isWithinCancellationWindow, normalizedStatus } from "../../../src/customer/utils/format";
+import { canCancelRequest, displayCustomerStatus, formatDate, isWithinCancellationWindow, normalizedStatus } from "../../../src/customer/utils/format";
 import { colors } from "../../../src/customer/theme";
 
 /**
@@ -419,17 +419,18 @@ export default function CustomerRequestsScreen() {
               const technicianName = details.assigned_technician_name?.trim();
               const technicianPhone = details.assigned_technician_phone?.trim();
 
-              const isActive = matches(request, "ACTIVE");
-              const isCompleted = matches(request, "COMPLETED");
-              const isAssigned = matches(request, "ASSIGNED");
-              const isCancelled = matches(request, "CANCELLED");
-
               // Only use the job explicitly linked to this request. Matching by service type
               // can accidentally display another customer's/job's technician.
               const targetJobId = details.linked_job_id ?? details.created_job?.id;
               const matchedJob = targetJobId
                 ? jobs.find((job) => job.id === targetJobId)
                 : undefined;
+
+              const shownStatus = displayCustomerStatus(
+                matchedJob?.status || request.created_job?.status || request.status,
+              );
+              const isCompleted = shownStatus === "COMPLETED";
+              const isCancelled = shownStatus === "CANCELLED";
 
               const resolvedJobId = targetJobId ?? matchedJob?.id;
               const showCancelRequest =
@@ -530,19 +531,7 @@ export default function CustomerRequestsScreen() {
                             : styles.statusPillTextActive,
                         ]}
                       >
-                        {isCompleted
-                          ? "Completed"
-                          : isCancelled
-                          ? ["REJECTED", "REJECTED_BY_TECHNICIAN"].includes(getStatus(request))
-                            ? "Rejected"
-                            : "Cancelled"
-                          : isActive
-                          ? "In Progress"
-                          : isAssigned
-                          ? "Assigned"
-                          : ["CREATED", "PENDING", "UNASSIGNED", "QUEUED", "AWAITING_ACCEPTANCE"].includes(getStatus(request))
-                          ? "Pending"
-                          : getStatus(request).replace(/_/g, " ") || "Pending"}
+                        {shownStatus}
                       </Text>
                     </View>
                   </View>

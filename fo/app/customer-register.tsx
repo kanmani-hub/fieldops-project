@@ -680,7 +680,7 @@ export default function CustomerRegistrationScreen() {
                     value.replace(/\D/g, "").slice(0, 10),
                   )
                 }
-                placeholder="10-digit mobile number"
+                placeholder="Enter 10-digit mobile number"
                 icon="call-outline"
                 keyboardType="phone-pad"
                 autoCapitalize="none"
@@ -776,7 +776,7 @@ export default function CustomerRegistrationScreen() {
               >
                 <Ionicons name="map-outline" size={18} color={MINT} />
                 <Text style={{ color: MINT, fontSize: 12, fontWeight: "800" }}>
-                  Choose location on map
+                  Pick location on map
                 </Text>
               </Pressable>
 

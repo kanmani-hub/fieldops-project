@@ -6,6 +6,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, radii, spacing } from "../theme";
+import { displayCustomerStatus } from "../utils/format";
 
 export function Screen({ children, scroll = true, contentStyle }: { children: React.ReactNode; scroll?: boolean; contentStyle?: ViewStyle }) {
   return (
@@ -52,23 +53,28 @@ export function ChoiceChips<T extends string>({ label, value, options, onChange 
 }
 
 export function StatusBadge({ status }: { status: string | null | undefined }) {
-  const normalized = (status ?? "UNKNOWN").trim().toUpperCase().replaceAll("-", "_");
+  const normalized = (status ?? "UNKNOWN").trim().toUpperCase().replaceAll("-", "_").replaceAll(" ", "_");
+  const label = displayCustomerStatus(status);
   const map: Record<string, { label: string; bg: string; fg: string }> = {
     CREATED: { label: "UNASSIGNED", bg: colors.warningSoft, fg: colors.warning },
     PENDING: { label: "UNASSIGNED", bg: colors.warningSoft, fg: colors.warning },
     UNASSIGNED: { label: "UNASSIGNED", bg: colors.warningSoft, fg: colors.warning },
     QUEUED: { label: "UNASSIGNED", bg: colors.warningSoft, fg: colors.warning },
     ASSIGNED: { label: "AWAITING ACCEPTANCE", bg: colors.blueSoft, fg: colors.blue },
-    ACCEPTED: { label: "ACCEPTED", bg: colors.blueSoft, fg: colors.blue },
+    AWAITING_ACCEPTANCE: { label: "AWAITING ACCEPTANCE", bg: colors.blueSoft, fg: colors.blue },
+    FORCE_ASSIGNED: { label: "AWAITING ACCEPTANCE", bg: colors.blueSoft, fg: colors.blue },
+    ACCEPTED: { label: "ASSIGNED", bg: colors.blueSoft, fg: colors.blue },
     EN_ROUTE: { label: "EN ROUTE", bg: colors.purpleSoft, fg: colors.purple },
+    ENROUTE: { label: "EN ROUTE", bg: colors.purpleSoft, fg: colors.purple },
     ON_SITE: { label: "IN PROGRESS", bg: colors.warningSoft, fg: colors.warning },
+    ONSITE: { label: "IN PROGRESS", bg: colors.warningSoft, fg: colors.warning },
     IN_PROGRESS: { label: "IN PROGRESS", bg: colors.warningSoft, fg: colors.warning },
     COMPLETED: { label: "COMPLETED", bg: colors.successSoft, fg: colors.success },
-    CLOSED: { label: "CLOSED", bg: "#E9ECEB", fg: "#47544C" },
+    CLOSED: { label: "COMPLETED", bg: colors.successSoft, fg: colors.success },
     CANCELLED: { label: "CANCELLED", bg: colors.dangerSoft, fg: colors.danger },
     REJECTED_BY_TECHNICIAN: { label: "CANCELLED", bg: colors.dangerSoft, fg: colors.danger },
   };
-  const entry = map[normalized] ?? { label: normalized.replaceAll("_", " "), bg: "#EFF2F0", fg: colors.muted };
+  const entry = map[normalized] ?? { label, bg: "#EFF2F0", fg: colors.muted };
   return <View style={[styles.badge, { backgroundColor: entry.bg }]}><Text style={[styles.badgeText, { color: entry.fg }]}>{entry.label}</Text></View>;
 }
 

@@ -28,6 +28,18 @@ export const getDispatchers = async (): Promise<Dispatcher[]> => {
   return response.data;
 };
 
+/** Activate or deactivate a dispatcher account within the current organization. */
+export const setDispatcherActive = async (
+  dispatcherId: string,
+  isActive: boolean,
+) => {
+  const response = await api.patch(
+    `/dispatchers/${encodeURIComponent(dispatcherId)}/active`,
+    { is_active: isActive },
+  );
+  return response.data;
+};
+
 /**
  * Request body for provisioning a technician.
  *
@@ -57,6 +69,7 @@ export const provisionTechnician = async (
 
 const dispatcherService = {
   getDispatchers,
+  setDispatcherActive,
   provisionTechnician,
 };
 

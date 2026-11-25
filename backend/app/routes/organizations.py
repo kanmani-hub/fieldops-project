@@ -41,6 +41,7 @@ from ..models.organization import Organization
 from ..models.user import User
 from ..models_legacy import Job, Technician
 from ..models.job_closure import JobClosure
+from ..models.payment_status import JobPaymentStatus
 from ..services.enterprise_audit import audit_log, AuditAction
 from ..models.organization_onboarding import OrganizationOnboarding
 import os
@@ -159,6 +160,7 @@ class CompleteOrganizationOnboardingRequest(BaseModel):
     onboarding_id: str
     password: str = Field(..., min_length=8, max_length=128)
     confirm_password: str = Field(..., min_length=8, max_length=128)
+    phone_number: str = Field(..., min_length=10, max_length=10, pattern=r"^\d{10}$")
 
 
 class VerifyOTPRequest(BaseModel):
@@ -497,6 +499,7 @@ async def complete_organization_onboarding(
         max_technicians=50,
         max_jobs_per_month=500,
         contact_email=onboarding.admin_email,
+        contact_phone=payload.phone_number,
         address=onboarding.address,
         site_latitude=onboarding.site_latitude,
         site_longitude=onboarding.site_longitude,
@@ -515,6 +518,7 @@ async def complete_organization_onboarding(
         password_hash=hash_password(payload.password),
         first_name=onboarding.admin_first_name,
         last_name=onboarding.admin_last_name,
+        phone_number=payload.phone_number,
         role=UserRole.SUPER_ADMIN.value,
         tenant_id=organization.id,
         is_active=True,
@@ -646,6 +650,8 @@ def get_platform_real_super_admins(db: Session):
 
 @org_router.get("/platform-stats")
 def get_platform_head_stats(
+    tenant_id: Optional[str] = Query(None),
+    period: str = Query("all", pattern="^(30d|90d|all)$"),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -666,12 +672,19 @@ def get_platform_head_stats(
     tenant_admin_map = get_platform_real_super_admins(db)
     total_organizations = len(tenant_admin_map)
 
-    # 2. Total jobs across all organizations (all statuses in the platform)
-    total_jobs = db.query(func.count(Job.id)).scalar() or 0
+    job_query = db.query(Job)
+    if tenant_id and tenant_id.strip().lower() != "all":
+        job_query = job_query.filter(Job.tenant_id == tenant_id.strip())
+    if period != "all":
+        start_at = datetime.now(timezone.utc) - timedelta(days=30 if period == "30d" else 90)
+        job_query = job_query.filter(Job.created_at >= start_at)
+
+    # Dashboard job totals follow the selected organization and date range.
+    total_jobs = job_query.with_entities(func.count(Job.id)).scalar() or 0
 
     # 3. Completed jobs
     completed_jobs = (
-        db.query(func.count(Job.id))
+        job_query.with_entities(func.count(Job.id))
         .filter(Job.status.in_(["COMPLETED", "CLOSED"]))
         .scalar()
         or 0
@@ -679,7 +692,7 @@ def get_platform_head_stats(
 
     # 4. Total cancelled jobs
     cancelled_jobs = (
-        db.query(func.count(Job.id))
+        job_query.with_entities(func.count(Job.id))
         .filter(Job.status.in_(["CANCELLED", "CANCELED"]))
         .scalar()
         or 0
@@ -688,16 +701,35 @@ def get_platform_head_stats(
     # 5. Active jobs - calculated so that Active + Completed + Cancelled == Total Jobs EQUALIZES strictly
     active_jobs = max(0, total_jobs - completed_jobs - cancelled_jobs)
 
-    # 6. Total payment / revenue across all organizations (filter anomalous mock fixtures > 5L)
-    closure_payment_sum = (
-        db.query(func.sum(JobClosure.subtotal))
-        .filter(JobClosure.subtotal < 500000.0)
-        .scalar()
+    # Financial metrics use persisted closure and payment-status records only.
+    closure_query = db.query(JobClosure).join(
+        Job, (Job.id == JobClosure.job_id) & (Job.tenant_id == JobClosure.tenant_id)
     )
-    if closure_payment_sum is not None and float(closure_payment_sum) > 0:
-        revenue_amount = float(closure_payment_sum)
-    else:
-        revenue_amount = float(completed_jobs * 3500.0)
+    if tenant_id and tenant_id.strip().lower() != "all":
+        closure_query = closure_query.filter(Job.tenant_id == tenant_id.strip())
+    if period != "all":
+        closure_query = closure_query.filter(JobClosure.completed_at >= start_at)
+    closures = closure_query.all()
+    revenue_amount = sum(float(c.subtotal or 0) for c in closures if 0 <= float(c.subtotal or 0) < 500000)
+    payment_rows = db.query(JobPaymentStatus).filter(
+        JobPaymentStatus.job_id.in_([c.job_id for c in closures])
+    ).all() if closures else []
+    payment_by_job = {row.job_id: row.status.upper() for row in payment_rows}
+    def payment_state(closure):
+        state = payment_by_job.get(closure.job_id, "UNAVAILABLE")
+        details = (closure.work_report or {}).get("payment", {}) if isinstance(closure.work_report, dict) else {}
+        if state == "UNAVAILABLE" and isinstance(details, dict) and details.get("method") and details.get("total_amount") is not None:
+            return "SUCCESSFUL"
+        return state
+    collected_amount = sum(
+        float(c.subtotal or 0) for c in closures
+        if payment_state(c) == "SUCCESSFUL" and 0 <= float(c.subtotal or 0) < 500000
+    )
+    pending_amount = sum(
+        float(c.subtotal or 0) for c in closures
+        if payment_state(c) == "PENDING" and 0 <= float(c.subtotal or 0) < 500000
+    )
+    payment_status_records = sum(payment_state(c) != "UNAVAILABLE" for c in closures)
 
     if revenue_amount >= 10000000:
         formatted_payment = f"₹{(revenue_amount / 10000000.0):.2f} Cr"
@@ -714,6 +746,11 @@ def get_platform_head_stats(
         "cancelled_jobs": cancelled_jobs,
         "total_payment": formatted_payment,
         "raw_payment_amount": revenue_amount,
+        "collected_payment_amount": collected_amount,
+        "pending_payment_amount": pending_amount,
+        "payment_records": len(closures),
+        "payment_status_records": payment_status_records,
+        "period": period,
     }
 
 
@@ -786,7 +823,9 @@ def get_platform_head_performance(
 def get_platform_head_jobs(
     search: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
+    payment_status: Optional[str] = Query(None),
     tenant_id: Optional[str] = Query(None),
+    period: str = Query("all", pattern="^(30d|90d|all)$"),
     page: int = Query(1, ge=1),
     limit: int = Query(15, ge=1, le=250),
     current_user: AuthenticatedUser = Depends(get_current_user),
@@ -815,15 +854,21 @@ def get_platform_head_jobs(
     tech_map = {row[0]: row[1] for row in tech_rows}
 
     # Base counts across all platform jobs (always equalized to dashboard metrics)
-    all_total_count = db.query(func.count(Job.id)).scalar() or 0
+    counts_query = db.query(Job)
+    if tenant_id and tenant_id.strip() and tenant_id.lower() != "all":
+        counts_query = counts_query.filter(Job.tenant_id == tenant_id.strip())
+    if period != "all":
+        jobs_start_at = datetime.now(timezone.utc) - timedelta(days=30 if period == "30d" else 90)
+        counts_query = counts_query.filter(Job.created_at >= jobs_start_at)
+    all_total_count = counts_query.with_entities(func.count(Job.id)).scalar() or 0
     all_completed_count = (
-        db.query(func.count(Job.id))
+        counts_query.with_entities(func.count(Job.id))
         .filter(Job.status.in_(["COMPLETED", "CLOSED"]))
         .scalar()
         or 0
     )
     all_cancelled_count = (
-        db.query(func.count(Job.id))
+        counts_query.with_entities(func.count(Job.id))
         .filter(Job.status.in_(["CANCELLED", "CANCELED"]))
         .scalar()
         or 0
@@ -832,10 +877,47 @@ def get_platform_head_jobs(
 
     # Query jobs
     query = db.query(Job).options(joinedload(Job.technician))
+    if period != "all":
+        query = query.filter(Job.created_at >= jobs_start_at)
 
     # Optional Filters
     if tenant_id and tenant_id.strip() and tenant_id.lower() != "all":
         query = query.filter(Job.tenant_id == tenant_id.strip())
+
+    if payment_status and payment_status.strip().upper() != "ALL":
+        payment_state = payment_status.strip().upper()
+        if payment_state not in {"PENDING", "SUCCESSFUL", "FAILED", "UNAVAILABLE"}:
+            raise HTTPException(status_code=400, detail="Unsupported payment status filter.")
+        if payment_state in {"SUCCESSFUL", "UNAVAILABLE"}:
+            status_query = db.query(JobPaymentStatus.job_id, JobPaymentStatus.status)
+            if tenant_id and tenant_id.strip().lower() != "all":
+                status_query = status_query.filter(JobPaymentStatus.tenant_id == tenant_id.strip())
+            status_rows = status_query.all()
+            states_by_job = {row.job_id: row.status.upper() for row in status_rows}
+            legacy_success_ids = []
+            if payment_state in {"SUCCESSFUL", "UNAVAILABLE"}:
+                legacy_query = db.query(JobClosure).join(
+                    Job, (Job.id == JobClosure.job_id) & (Job.tenant_id == JobClosure.tenant_id)
+                ).filter(JobClosure.work_report.isnot(None))
+                if tenant_id and tenant_id.strip().lower() != "all":
+                    legacy_query = legacy_query.filter(Job.tenant_id == tenant_id.strip())
+                legacy_closures = legacy_query.all()
+                for closure in legacy_closures:
+                    report = closure.work_report if isinstance(closure.work_report, dict) else {}
+                    details = report.get("payment") if isinstance(report.get("payment"), dict) else {}
+                    if details.get("method") and details.get("total_amount") is not None:
+                        legacy_success_ids.append(closure.job_id)
+            successful_ids = [job_id for job_id, state in states_by_job.items() if state == "SUCCESSFUL"]
+            if payment_state == "SUCCESSFUL":
+                query = query.filter(Job.id.in_(set(successful_ids + legacy_success_ids)))
+            else:
+                known_ids = {job_id for job_id, state in states_by_job.items() if state != "UNAVAILABLE"} | set(legacy_success_ids)
+                query = query.filter(~Job.id.in_(known_ids)) if known_ids else query
+        else:
+            payment_job_ids = db.query(JobPaymentStatus.job_id).filter(
+                JobPaymentStatus.status == payment_state
+            )
+            query = query.filter(Job.id.in_(payment_job_ids))
 
     if status and status.strip() and status.lower() != "all":
         s_upper = status.strip().upper().replace(" ", "_")
@@ -850,34 +932,49 @@ def get_platform_head_jobs(
 
     if search and search.strip():
         search_term = f"%{search.strip()}%"
+        matching_org_ids = db.query(Organization.id).filter(Organization.name.ilike(search_term))
         query = query.filter(
             or_(
                 cast(Job.id, String).ilike(search_term),
                 Job.customer_name.ilike(search_term),
+                Job.contact_number.ilike(search_term),
                 Job.service_type.ilike(search_term),
                 Job.issue_description.ilike(search_term),
                 Job.tenant_id.ilike(search_term),
+                Job.tenant_id.in_(matching_org_ids),
                 Job.location.ilike(search_term),
+                cast(Job.assigned_technician_id, String).ilike(search_term),
+                Job.technician.has(Technician.technician_name.ilike(search_term)),
             )
         )
 
     filtered_total = query.count()
     jobs = query.order_by(Job.id.desc()).offset((page - 1) * limit).limit(limit).all()
 
-    # Pre-fetch closure payment amounts for completed jobs
+    # Pre-fetch closure and authoritative payment status for the displayed jobs.
     job_ids = [j.id for j in jobs]
     closure_map = {}
+    closure_records = {}
     if job_ids:
         closures = (
-            db.query(JobClosure.job_id, JobClosure.subtotal)
-            .filter(JobClosure.job_id.in_(job_ids), JobClosure.subtotal < 500000.0)
+            db.query(JobClosure)
+            .filter(JobClosure.job_id.in_(job_ids), JobClosure.subtotal >= 0, JobClosure.subtotal < 500000.0)
+            .order_by(JobClosure.completed_at.desc(), JobClosure.id.desc())
             .all()
         )
-        for j_id, subtotal in closures:
-            if subtotal and float(subtotal) > 0:
-                closure_map[j_id] = float(subtotal)
-
-    REAL_CUSTOMER_POOL = ["Keerthi Lincy", "Lincy K"]
+        for closure in closures:
+            closure_map.setdefault(closure.job_id, float(closure.subtotal or 0))
+            closure_records.setdefault(closure.job_id, closure)
+    payment_rows = db.query(JobPaymentStatus).filter(
+        JobPaymentStatus.job_id.in_(job_ids)
+    ).all() if job_ids else []
+    payment_status_by_job = {row.job_id: row.status.upper() for row in payment_rows}
+    for j_id, closure in closure_records.items():
+        state = payment_status_by_job.get(j_id, "UNAVAILABLE")
+        work_report = closure.work_report if isinstance(closure.work_report, dict) else {}
+        payment_details = work_report.get("payment") if isinstance(work_report.get("payment"), dict) else {}
+        if state == "UNAVAILABLE" and payment_details.get("method") and payment_details.get("total_amount") is not None:
+            payment_status_by_job[j_id] = "SUCCESSFUL"
 
     items = []
     for j in jobs:
@@ -892,15 +989,7 @@ def get_platform_head_jobs(
         if not tech_name:
             tech_name = "Unassigned"
 
-        cust_name = (j.customer_name or "").strip()
-        if cust_name not in {"Keerthi Lincy", "Lincy K"}:
-            contact = getattr(j, "contact_number", "") or ""
-            if "8015434358" in contact:
-                cust_name = "Keerthi Lincy"
-            elif "7904160877" in contact:
-                cust_name = "Lincy K"
-            else:
-                cust_name = REAL_CUSTOMER_POOL[j.id % 2]
+        cust_name = (j.customer_name or "").strip() or "—"
 
         raw_status = (j.status or "CREATED").upper().replace(" ", "_")
         if raw_status in {"REJECTED_BY_TECHNICIAN", "REJECTED", "DECLINED"}:
@@ -909,10 +998,8 @@ def get_platform_head_jobs(
         # Determine payment amount for completed jobs
         payment_amount = None
         formatted_payment = "—"
-        if raw_status in {"COMPLETED", "CLOSED"}:
-            amt = closure_map.get(j.id)
-            if amt is None or amt <= 0:
-                amt = float(1200 + ((j.id * 173) % 1800))
+        if j.id in closure_map:
+            amt = closure_map[j.id]
             payment_amount = round(amt, 2)
             formatted_payment = f"₹{amt:,.0f}" if amt == int(amt) else f"₹{amt:,.2f}"
 
@@ -930,6 +1017,7 @@ def get_platform_head_jobs(
             "technician_name": tech_name,
             "payment_amount": payment_amount,
             "formatted_payment": formatted_payment,
+            "payment_status": payment_status_by_job.get(j.id, "UNAVAILABLE"),
             "location": getattr(j, "site_address", None) or j.location or "—",
             "preferred_service_date": str(j.preferred_service_date) if j.preferred_service_date else None,
             "created_at": j.created_at.isoformat() if getattr(j, "created_at", None) else None,
@@ -1026,6 +1114,11 @@ async def list_organizations(
             Job.tenant_id == org.id,
             Job.status.in_(["COMPLETED", "CLOSED"]),
         ).scalar() or 0
+        cancelled_job_count = db.query(func.count(Job.id)).filter(
+            Job.tenant_id == org.id,
+            Job.status.in_(["CANCELLED", "CANCELED"]),
+        ).scalar() or 0
+        active_job_count = max(0, job_count - completed_job_count - cancelled_job_count)
         tech_table_count = db.query(func.count(Technician.technician_id)).filter(
             Technician.tenant_id == org.id,
         ).scalar() or 0
@@ -1039,7 +1132,7 @@ async def list_organizations(
         # Revenue calculation from JobClosure for completed jobs
         tenant_closure_sum = (
             db.query(func.sum(JobClosure.subtotal))
-            .join(Job, Job.id == JobClosure.job_id)
+            .join(Job, (Job.id == JobClosure.job_id) & (Job.tenant_id == JobClosure.tenant_id))
             .filter(
                 Job.tenant_id == org.id,
                 JobClosure.subtotal > 0,
@@ -1048,8 +1141,6 @@ async def list_organizations(
             .scalar()
         )
         raw_rev = float(tenant_closure_sum or 0.0)
-        if raw_rev <= 0 and completed_job_count > 0:
-            raw_rev = float(completed_job_count * 1850.0)
 
         if raw_rev >= 100000:
             formatted_rev = f"₹{(raw_rev / 100000.0):.1f}L"
@@ -1095,14 +1186,6 @@ async def list_organizations(
             if c_name not in cleaned_services:
                 cleaned_services.append(c_name)
 
-        if not cleaned_services:
-            cleaned_services = [
-                "HVAC & Air Conditioning",
-                "Electrical & Power Systems",
-                "Plumbing & Piping",
-                "General Facility Maintenance",
-            ]
-
         results.append({
             "id": org.id,
             "name": org.name,
@@ -1121,6 +1204,8 @@ async def list_organizations(
             "technicians_count": technician_count,
             "job_count": job_count,
             "completed_job_count": completed_job_count,
+            "active_job_count": active_job_count,
+            "cancelled_job_count": cancelled_job_count,
             "total_revenue": formatted_rev,
             "total_payment": formatted_rev,
             "raw_revenue": raw_rev,
@@ -1528,6 +1613,7 @@ async def create_org_admin(
             .filter(
                 User.tenant_id == org_id,
                 User.role == UserRole.DISPATCHER.value,
+                User.is_active.is_(True),
                 User.deleted_at.is_(None),
             )
             .first()
@@ -1536,7 +1622,7 @@ async def create_org_admin(
         if existing_dispatcher:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="For one organization, only one dispatcher is allowed.",
+                detail="Only one active dispatcher is allowed per organization.",
             )
     # Check user limit
     current_user_count = db.query(func.count(User.id)).filter(
@@ -1550,15 +1636,20 @@ async def create_org_admin(
             detail=f"Organization has reached its user limit ({org.max_users})",
         )
 
-    # Check duplicate email
+    # Login identifies accounts by email, so email addresses must be unique
+    # across organizations as well as within this organization.
     existing = db.query(User).filter(
-        User.email == payload.email.lower().strip(),
-        User.tenant_id == org_id,
+        func.lower(User.email) == payload.email.lower().strip(),
         User.deleted_at.is_(None),
     ).first()
 
     if existing:
-        raise HTTPException(status_code=409, detail="Email already exists in this organization")
+        detail = (
+            "Email already exists in this organization"
+            if existing.tenant_id == org_id
+            else "Email is already associated with another FieldOps account. Use a different email address."
+        )
+        raise HTTPException(status_code=409, detail=detail)
 
     # Validate password
     try:
@@ -1582,6 +1673,33 @@ async def create_org_admin(
         is_email_verified=True,  # Admin-created accounts are pre-verified
     )
     db.add(admin)
+
+    if role == UserRole.TECHNICIAN:
+        # Technician directory pages read from the technicians table, while
+        # account provisioning creates the login in users. Keep both records
+        # linked so the phone number is immediately available on web and mobile.
+        directory_technician = db.query(Technician).filter(
+            Technician.tenant_id == org_id,
+            Technician.tech_id == admin.id,
+        ).first()
+        if directory_technician is None:
+            directory_technician = Technician(
+                tech_id=admin.id,
+                tenant_id=org_id,
+                technician_name=f"{admin.first_name} {admin.last_name}".strip(),
+                technician_skill="General Technician",
+                technician_location=org.address or "Main Zone",
+                technician_status="OFFLINE",
+                current_jobs=0,
+                max_jobs=5,
+                phone_number=payload.phone_number,
+            )
+            db.add(directory_technician)
+        else:
+            directory_technician.technician_name = (
+                f"{admin.first_name} {admin.last_name}".strip()
+            )
+            directory_technician.phone_number = payload.phone_number
 
     audit_log(
         db, action=AuditAction.USER_CREATED,

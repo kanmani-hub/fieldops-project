@@ -17,7 +17,7 @@ from .logger import logger
 from .services.timer_service import TimerService
 from .services.dispatch_agent import DispatchAgent
 from .services.distributed_lock_service import with_job_lock
-from .services.dispatch_scheduling import dispatch_due_at
+from .services.dispatch_scheduling import dispatch_due_at, overnight_dispatch_due_at
 from .services.re_dispatch_trigger import ReDispatchTriggerService
 from .services.re_dispatch_queue import ReDispatchQueueService
 from .services.sla_escalation_service import SLAEscalationService
@@ -812,11 +812,17 @@ def register_scheduled_dispatch(job_id: int, dispatch_attempt_id: str):
         timezone_name = getattr(job, "preferred_service_timezone", None) or (
             settings.get("timezone") if isinstance(settings, dict) else None
         )
-        due_at = dispatch_due_at(
+        due_at = overnight_dispatch_due_at(
+            getattr(job, "created_at", None), timezone_name
+        ) or dispatch_due_at(
             job.preferred_service_date,
             timezone_name,
             getattr(job, "preferred_service_time", None),
         )
+        if due_at < datetime.now(timezone.utc) and overnight_dispatch_due_at(
+            getattr(job, "created_at", None), timezone_name
+        ) is not None:
+            due_at = datetime.now(timezone.utc) + timedelta(seconds=1)
 
     schedule_job_id = f"dispatch_due_job_{int(job_id)}"
     scheduler.add_job(
@@ -874,6 +880,44 @@ def register_pending_scheduled_dispatches():
         "pending_dispatch_schedules_recovered count=%s outcome=complete",
         registered,
     )
+
+
+def register_pending_overnight_dispatches():
+    """Restore after-hours dispatch triggers after an application restart."""
+    with SessionLocal() as db:
+        pending_jobs = (
+            db.query(Job.id, Job.created_at, Job.preferred_service_timezone, Job.tenant_id)
+            .filter(
+                func.upper(func.trim(Job.status)).in_(
+                    ["CREATED", "QUEUED", "UNASSIGNED"]
+                ),
+                Job.assigned_technician_id.is_(None),
+            )
+            .all()
+        )
+        organization_timezones = {}
+        for row in pending_jobs:
+            if not row.preferred_service_timezone and row.tenant_id:
+                from .models import Organization
+                organization = db.query(Organization).filter(Organization.id == row.tenant_id).first()
+                settings = getattr(organization, "settings", None) or {}
+                if isinstance(settings, dict):
+                    organization_timezones[row.id] = settings.get("timezone")
+
+    registered = 0
+    for row in pending_jobs:
+        timezone_name = row.preferred_service_timezone or organization_timezones.get(row.id)
+        if overnight_dispatch_due_at(row.created_at, timezone_name) is None:
+            continue
+        try:
+            register_scheduled_dispatch(int(row.id), str(uuid.uuid4()))
+            registered += 1
+        except Exception:
+            logger.exception(
+                "overnight_dispatch_recovery_failed job_id=%s",
+                row.id,
+            )
+    logger.info("pending_overnight_dispatches_recovered count=%s", registered)
 
 
 def start_scheduler():

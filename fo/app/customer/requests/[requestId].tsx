@@ -27,6 +27,7 @@ import type {
 import {
   canCancelRequest,
   canEditRequest,
+  displayCustomerStatus,
   formatDate,
   formatDateTime,
   formatMoney,
@@ -62,28 +63,6 @@ function initials(name?: string | null): string {
   return parts.length > 1
     ? `${parts[0][0]}${parts[1][0]}`.toUpperCase()
     : (parts[0]?.slice(0, 2) || "TE").toUpperCase();
-}
-
-function displayStatus(value?: string | null): string {
-  const status = normalizedStatus(value);
-  const labels: Record<string, string> = {
-    CREATED: "BOOKED",
-    PENDING: "PENDING",
-    UNASSIGNED: "UNASSIGNED",
-    ASSIGNED: "ASSIGNED",
-    ACCEPTED: "ACCEPTED",
-    EN_ROUTE: "EN ROUTE",
-    ENROUTE: "EN ROUTE",
-    ON_SITE: "ON SITE",
-    ONSITE: "ON SITE",
-    IN_PROGRESS: "WORK IN PROGRESS",
-    COMPLETED: "COMPLETED",
-    CLOSED: "COMPLETED",
-    CANCELLED: "CANCELLED",
-    CANCELED: "CANCELLED",
-    REJECTED_BY_TECHNICIAN: "CANCELLED",
-  };
-  return labels[status] ?? status.replaceAll("_", " ");
 }
 
 function paymentLabel(value?: string | null): string {
@@ -449,7 +428,7 @@ export default function ServiceRequestDetailScreen() {
               </View>
               <View style={[styles.statusPill, isCompleted ? styles.statusCompleted : isCancelled ? styles.statusCancelled : styles.statusOther]}>
                 <Ionicons name={isCompleted ? "checkmark-circle" : isCancelled ? "close-circle" : "time-outline"} size={14} color={isCompleted ? colors.success : isCancelled ? colors.danger : colors.brandMid} />
-                <Text style={[styles.statusPillText, { color: isCompleted ? colors.success : isCancelled ? colors.danger : colors.brandMid }]}>{displayStatus(status)}</Text>
+                <Text style={[styles.statusPillText, { color: isCompleted ? colors.success : isCancelled ? colors.danger : colors.brandMid }]}>{displayCustomerStatus(status)}</Text>
               </View>
             </View>
 

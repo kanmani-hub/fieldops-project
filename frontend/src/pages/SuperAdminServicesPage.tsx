@@ -397,6 +397,8 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
   const [selectedServiceType, setSelectedServiceType] = useState<TaxonomyServiceType | null>(null);
   const [activeCategory, setActiveCategory] = useState<TaxonomyCategory | null>(null);
   const [selectedIssuesByCategory, setSelectedIssuesByCategory] = useState<Record<string, string[]>>({});
+  const [savedIssuesByCategory, setSavedIssuesByCategory] = useState<Record<string, string[]>>({});
+  const [initializedCategoryKeys, setInitializedCategoryKeys] = useState<Set<string>>(() => new Set());
 
   const normalizeCatalogValue = (value?: string | null) =>
     (value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -483,12 +485,26 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
 
   const selectedCategoryCount = Object.values(selectedIssuesByCategory).filter((items) => items.length > 0).length;
   const selectedIssueCount = Object.values(selectedIssuesByCategory).reduce((count, items) => count + items.length, 0);
+  const savedIssueCount = Object.values(savedIssuesByCategory).reduce((count, items) => count + items.length, 0);
+  const unsavedChangeCount = selectedServiceType
+    ? selectedServiceType.categories.reduce((count, category) => {
+        const selected = selectedIssuesByCategory[category.id] || [];
+        const saved = savedIssuesByCategory[category.id] || [];
+        const issueKeys = new Set([...selected, ...saved].map(normalizeCatalogValue));
+        return count + [...issueKeys].filter((key) =>
+          selected.some((issue) => normalizeCatalogValue(issue) === key) !==
+          saved.some((issue) => normalizeCatalogValue(issue) === key)
+        ).length;
+      }, 0)
+    : 0;
 
   const chooseServiceType = (serviceType: TaxonomyServiceType) => {
     const changingType = selectedServiceType?.id !== serviceType.id;
 
     if (changingType) {
-      setSelectedIssuesByCategory(getSavedIssuesForType(serviceType));
+      const saved = getSavedIssuesForType(serviceType);
+      setSelectedIssuesByCategory(saved);
+      setSavedIssuesByCategory(saved);
     }
 
     setSelectedServiceType(serviceType);
@@ -500,6 +516,15 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
   };
 
   const openCategory = (category: TaxonomyCategory) => {
+    if (!selectedServiceType) return;
+    const categoryKey = `${selectedServiceType.id}:${category.id}`;
+    if (!initializedCategoryKeys.has(categoryKey)) {
+      setSelectedIssuesByCategory((current) => ({
+        ...current,
+        [category.id]: [...category.issues],
+      }));
+      setInitializedCategoryKeys((current) => new Set(current).add(categoryKey));
+    }
     setActiveCategory(category);
     setIssueSearch("");
     setErrorMessage("");
@@ -518,6 +543,14 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
 
     if (step === 3) {
       // Step 3: Issues -> Step 2: Categories
+      if (activeCategory && selectedServiceType) {
+        const categoryKey = `${selectedServiceType.id}:${activeCategory.id}`;
+        setSelectedIssuesByCategory((current) => ({
+          ...current,
+          [activeCategory.id]: [...(savedIssuesByCategory[activeCategory.id] || [])],
+        }));
+        setInitializedCategoryKeys((current) => new Set(current).add(categoryKey));
+      }
       setActiveCategory(null);
       setIssueSearch("");
       setStep(2);
@@ -526,7 +559,15 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
 
     if (step === 2) {
       // Step 2: Categories -> Step 1: Service Types
-      // Preserve selectedServiceType and selectedIssuesByCategory.
+      // Discard unsaved edits and restore the last persisted selections.
+      if (selectedServiceType) {
+        const saved = getSavedIssuesForType(selectedServiceType);
+        setSelectedIssuesByCategory(saved);
+        setSavedIssuesByCategory(saved);
+        setInitializedCategoryKeys(new Set(
+          selectedServiceType.categories.map((category) => `${selectedServiceType.id}:${category.id}`)
+        ));
+      }
       setActiveCategory(null);
       setCategorySearch("");
       setIssueSearch("");
@@ -556,6 +597,32 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
   const clearActiveCategory = () => {
     if (!activeCategory) return;
     setSelectedIssuesByCategory((current) => ({ ...current, [activeCategory.id]: [] }));
+  };
+
+  const selectAllCategoryIssues = () => {
+    if (!selectedServiceType) return;
+    setSelectedIssuesByCategory((current) => ({
+      ...current,
+      ...Object.fromEntries(selectedServiceType.categories.map((category) => [category.id, [...category.issues]])),
+    }));
+    setInitializedCategoryKeys((current) => {
+      const next = new Set(current);
+      selectedServiceType.categories.forEach((category) => next.add(`${selectedServiceType.id}:${category.id}`));
+      return next;
+    });
+  };
+
+  const deselectAllCategoryIssues = () => {
+    if (!selectedServiceType) return;
+    setSelectedIssuesByCategory((current) => ({
+      ...current,
+      ...Object.fromEntries(selectedServiceType.categories.map((category) => [category.id, []])),
+    }));
+    setInitializedCategoryKeys((current) => {
+      const next = new Set(current);
+      selectedServiceType.categories.forEach((category) => next.add(`${selectedServiceType.id}:${category.id}`));
+      return next;
+    });
   };
 
   const removeCategorySelection = (categoryId: string) => {
@@ -640,6 +707,7 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
         await deleteAdminService(service.id);
       }
 
+      setSavedIssuesByCategory(selectedIssuesByCategory);
       await onSaved(selectedIssueCount, selectedServiceType.name);
     } catch (err: any) {
       setErrorMessage(
@@ -666,6 +734,15 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
   const isIssueSelected = (issue: string) => Boolean(
     activeCategory && (selectedIssuesByCategory[activeCategory.id] || []).includes(issue)
   );
+
+  const getCategorySelectionState = (categoryId: string): "saved" | "unsaved" | "unselected" => {
+    const selected = new Set((selectedIssuesByCategory[categoryId] || []).map(normalizeCatalogValue));
+    const saved = new Set((savedIssuesByCategory[categoryId] || []).map(normalizeCatalogValue));
+    const allKeys = new Set([...selected, ...saved]);
+    const hasUnsavedChanges = [...allKeys].some((key) => selected.has(key) !== saved.has(key));
+    if (hasUnsavedChanges) return "unsaved";
+    return saved.size > 0 ? "saved" : "unselected";
+  };
 
   return (
     <div
@@ -927,28 +1004,36 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
                   <input value={categorySearch} onChange={(event) => setCategorySearch(event.target.value)} placeholder="Search categories..." style={{ width: "100%", boxSizing: "border-box", padding: "9px 12px 9px 34px", border: "1px solid #CBD5E1", borderRadius: 9, fontSize: 12.5, outline: "none" }} />
                 </div>
               </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                <button type="button" onClick={selectAllCategoryIssues} disabled={submitting} style={{ border: "1px solid #059669", color: "#047857", background: "#ECFDF5", borderRadius: 9, padding: "8px 11px", fontSize: 11.5, fontWeight: 800, cursor: submitting ? "not-allowed" : "pointer" }}>Select All Issues</button>
+                <button type="button" onClick={deselectAllCategoryIssues} disabled={submitting} style={{ border: "1px solid #CBD5E1", color: "#475569", background: "#FFFFFF", borderRadius: 9, padding: "8px 11px", fontSize: 11.5, fontWeight: 700, cursor: submitting ? "not-allowed" : "pointer" }}>Deselect All Issues</button>
+              </div>
               {selectedCategoryCount > 0 && (
                 <div style={{ marginBottom: 14, display: "flex", flexWrap: "wrap", gap: 7 }}>
-                  {selectedServiceType.categories.filter((category) => (selectedIssuesByCategory[category.id] || []).length > 0).map((category) => (
-                    <span key={category.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, borderRadius: 99, background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#047857", padding: "5px 9px", fontSize: 11, fontWeight: 700 }}>
-                      {category.name} ({selectedIssuesByCategory[category.id].length})
-                      <button type="button" onClick={() => removeCategorySelection(category.id)} aria-label={`Remove ${category.name}`} style={{ border: 0, background: "transparent", padding: 0, color: "#047857", cursor: "pointer", display: "inline-flex" }}><X size={12} /></button>
+                  {selectedServiceType.categories.filter((category) => (selectedIssuesByCategory[category.id] || []).length > 0).map((category) => {
+                    const selectionState = getCategorySelectionState(category.id);
+                    return (
+                    <span key={category.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, borderRadius: 99, background: selectionState === "unsaved" ? "#FFF7E6" : "#ECFDF5", border: `1px solid ${selectionState === "unsaved" ? "#FCD34D" : "#A7F3D0"}`, color: selectionState === "unsaved" ? "#92400E" : "#047857", padding: "5px 9px", fontSize: 11, fontWeight: 700 }}>
+                      {category.name} ({selectedIssuesByCategory[category.id].length}) · {selectionState === "unsaved" ? "unsaved" : "saved"}
+                      <button type="button" onClick={() => removeCategorySelection(category.id)} aria-label={`Remove ${category.name}`} style={{ border: 0, background: "transparent", padding: 0, color: selectionState === "unsaved" ? "#92400E" : "#047857", cursor: "pointer", display: "inline-flex" }}><X size={12} /></button>
                     </span>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(205px, 1fr))", gap: 13 }}>
                 {visibleCategories.map((category) => {
                   const selectedCount = (selectedIssuesByCategory[category.id] || []).length;
+                  const selectionState = getCategorySelectionState(category.id);
                   const imagePath = getCategoryCardImage(category.id, selectedServiceType.id);
                   return (
-                    <button key={category.id} type="button" onClick={() => openCategory(category)} style={{ ...cardBase, borderColor: selectedCount > 0 ? "#059669" : "#E2E8F0", boxShadow: selectedCount > 0 ? "0 0 0 2px rgba(5,150,105,.10)" : "0 1px 3px rgba(15,23,42,.03)" }}>
+                    <button key={category.id} type="button" onClick={() => openCategory(category)} style={{ ...cardBase, borderWidth: selectionState === "unselected" ? 1 : 2, borderColor: selectionState === "saved" ? "#059669" : selectionState === "unsaved" ? "#F59E0B" : "#CBD5E1", background: selectionState === "saved" ? "#ECFDF5" : selectionState === "unsaved" ? "#FFF7E6" : "#FFFFFF", boxShadow: selectionState === "saved" ? "0 0 0 2px rgba(5,150,105,.10)" : selectionState === "unsaved" ? "0 0 0 2px rgba(245,158,11,.12)" : "0 1px 3px rgba(15,23,42,.03)" }}>
                       <div style={{ height: 112, position: "relative", background: "#F1F5F9", overflow: "hidden" }}>
                         <img src={imagePath} alt={category.name} loading="lazy" style={{ display: "block", width: "100%", height: "100%", objectFit: "contain", objectPosition: "center" }} />
                       </div>
                       <div style={{ padding: "10px 11px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
                         <span style={{ color: "#0F172A", fontWeight: 800, fontSize: 12.5 }}>{category.name}</span>
-                        <span style={{ fontSize: 10.5, color: selectedCount > 0 ? "#047857" : "#64748B", fontWeight: 800, whiteSpace: "nowrap" }}>{selectedCount > 0 ? `${selectedCount} selected` : `${category.issues.length} issues`}</span>
+                        <span style={{ fontSize: 10.5, color: selectionState === "saved" ? "#047857" : selectionState === "unsaved" ? "#92400E" : "#64748B", fontWeight: 800, whiteSpace: "nowrap" }}>{selectionState === "unsaved" ? (selectedCount > 0 ? `${selectedCount} unsaved` : "Removal unsaved") : selectionState === "saved" ? `${selectedCount} saved` : `${category.issues.length} issues`}</span>
                       </div>
                     </button>
                   );
@@ -996,6 +1081,20 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
                   <button type="button" onClick={clearActiveCategory} style={{ border: "1px solid #CBD5E1", color: "#475569", background: "#FFFFFF", borderRadius: 9, padding: "8px 11px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Deselect All</button>
                 </div>
               </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", marginBottom: 12, color: "#334155", fontSize: 11.5, fontWeight: 700 }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+                  <span style={{ width: 21, height: 21, display: "grid", placeItems: "center", borderRadius: 6, border: "1px solid #059669", background: "#D1FAE5", color: "#047857" }}><Check size={13} /></span>
+                  Selected &amp; saved
+                </span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+                  <span style={{ width: 21, height: 21, display: "grid", placeItems: "center", borderRadius: 6, border: "1px solid #F59E0B", background: "#FEF3C7", color: "#B45309" }}><Check size={13} /></span>
+                  Selected · unsaved
+                </span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+                  <span style={{ width: 21, height: 21, display: "grid", placeItems: "center", borderRadius: 6, border: "1px solid #CBD5E1", background: "#FFFFFF", color: "#94A3B8" }} />
+                  Not selected
+                </span>
+              </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 13 }}>
                 <span style={{ borderRadius: 99, padding: "5px 10px", background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#047857", fontSize: 11, fontWeight: 800 }}>{(selectedIssuesByCategory[activeCategory.id] || []).length} of {activeCategory.issues.length} selected</span>
                 <button
@@ -1017,14 +1116,36 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
                 {visibleIssues.map((issue, index) => {
                   const selected = isIssueSelected(issue);
+                  const saved = (savedIssuesByCategory[activeCategory.id] || [])
+                    .some((item) => normalizeCatalogValue(item) === normalizeCatalogValue(issue));
+                  const selectionState = selected ? (saved ? "saved" : "unsaved") : "unselected";
                   const imagePath = getIssueCardImage(issue, activeCategory.id, selectedServiceType.id, activeCategory.issues.indexOf(issue));
                   return (
-                    <button key={issue} type="button" onClick={() => toggleIssue(issue)} style={{ ...cardBase, borderColor: selected ? "#059669" : "#E2E8F0", boxShadow: selected ? "0 0 0 2px rgba(5,150,105,.12)" : "0 1px 3px rgba(15,23,42,.03)" }}>
+                    <button
+                      key={issue}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() => toggleIssue(issue)}
+                      style={{
+                        ...cardBase,
+                        borderWidth: selectionState === "unselected" ? 1 : 2,
+                        borderColor: selectionState === "saved" ? "#059669" : selectionState === "unsaved" ? "#F59E0B" : "#CBD5E1",
+                        background: selectionState === "saved" ? "#ECFDF5" : selectionState === "unsaved" ? "#FFF7E6" : "#FFFFFF",
+                        boxShadow: selectionState === "saved" ? "0 0 0 2px rgba(5,150,105,.10)" : selectionState === "unsaved" ? "0 0 0 2px rgba(245,158,11,.12)" : "0 1px 3px rgba(15,23,42,.03)",
+                      }}
+                    >
                       <div style={{ height: 112, position: "relative", background: "#F1F5F9", overflow: "hidden" }}>
                         <img src={imagePath} alt={issue} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
                         <span style={{ position: "absolute", top: 8, right: 8, width: 23, height: 23, borderRadius: 7, display: "grid", placeItems: "center", background: selected ? "#059669" : "rgba(255,255,255,.96)", border: `1px solid ${selected ? "#059669" : "#94A3B8"}`, color: selected ? "#FFFFFF" : "transparent" }}><Check size={14} /></span>
                       </div>
-                      <div style={{ padding: "10px 11px", minHeight: 48, display: "flex", alignItems: "center", color: "#0F172A", fontSize: 12, fontWeight: 800, lineHeight: 1.35 }}>{issue}</div>
+                      <div style={{ padding: "10px 11px", minHeight: 48, display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", gap: 7, color: "#0F172A", fontSize: 12, fontWeight: 800, lineHeight: 1.35 }}>
+                        <span>{issue}</span>
+                        {selectionState !== "unselected" && (
+                          <span style={{ borderRadius: 99, padding: "4px 8px", background: selectionState === "saved" ? "#059669" : "#FDE68A", color: selectionState === "saved" ? "#FFFFFF" : "#854D0E", fontSize: 9, fontWeight: 900, letterSpacing: 0.35 }}>
+                            {selectionState === "saved" ? "SAVED" : "UNSAVED"}
+                          </span>
+                        )}
+                      </div>
                     </button>
                   );
                 })}
@@ -1042,14 +1163,19 @@ function ServiceCatalogueAddWizard({ onClose, onSaved, configuredServices }: Ser
             <span style={{ background: "#ECFDF5", color: "#047857", borderRadius: 99, padding: "6px 10px", fontSize: 11.5, fontWeight: 800 }}>{selectedServiceType ? selectedServiceType.name : "No service type"}</span>
             <span style={{ color: "#64748B", fontSize: 11.5 }}>{selectedCategoryCount} categories</span>
             <span style={{ color: "#64748B", fontSize: 11.5 }}>{selectedIssueCount} issues</span>
+            {selectedServiceType && (
+              <span style={{ borderRadius: 99, padding: "5px 9px", background: unsavedChangeCount > 0 ? "#FFF7E6" : "#ECFDF5", border: `1px solid ${unsavedChangeCount > 0 ? "#FCD34D" : "#A7F3D0"}`, color: unsavedChangeCount > 0 ? "#92400E" : "#047857", fontSize: 10.5, fontWeight: 800 }}>
+                {savedIssueCount} saved · {unsavedChangeCount === 0 ? "No unsaved changes" : `${unsavedChangeCount} unsaved ${unsavedChangeCount === 1 ? "change" : "changes"}`}
+              </span>
+            )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
 
             {step === 1 ? (
               <button type="button" disabled style={{ padding: "9px 17px", border: 0, borderRadius: 9, color: "#FFFFFF", background: "#94A3B8", fontSize: 12.5, fontWeight: 800, cursor: "not-allowed" }}>Choose a Service Type</button>
             ) : (
-              <button type="button" onClick={handleAddSelected} disabled={submitting} style={{ padding: "9px 18px", border: 0, borderRadius: 9, color: "#FFFFFF", background: !submitting ? "#059669" : "#94A3B8", fontSize: 12.5, fontWeight: 800, cursor: !submitting ? "pointer" : "not-allowed", display: "inline-flex", alignItems: "center", gap: 7 }}>
-                Save
+              <button type="button" onClick={handleAddSelected} disabled={submitting || unsavedChangeCount === 0} style={{ padding: "9px 18px", border: 0, borderRadius: 9, color: "#FFFFFF", background: !submitting && unsavedChangeCount > 0 ? "#059669" : "#94A3B8", fontSize: 12.5, fontWeight: 800, cursor: !submitting && unsavedChangeCount > 0 ? "pointer" : "not-allowed", display: "inline-flex", alignItems: "center", gap: 7 }}>
+                {submitting ? "Saving…" : "Save changes"}
               </button>
             )}
           </div>
