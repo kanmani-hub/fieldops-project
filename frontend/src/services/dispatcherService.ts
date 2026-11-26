@@ -312,6 +312,37 @@ export const subscribeReconnectionRecovery = (
   };
 };
 
+export interface WebSocketAuthConfig {
+  status: string;
+  tenant_source: string;
+  tenant_id?: string;
+}
+
+export const DEFAULT_WEBSOCKET_AUTH_CONFIG: WebSocketAuthConfig = {
+  status: "AUTHENTICATED",
+  tenant_source: "VERIFIED_TOKEN_CLAIMS",
+};
+
+export const getWebSocketAuthOptions = (
+  token?: string,
+  tenantId?: string,
+  options?: Record<string, any>
+) => {
+  return {
+    ...DEFAULT_SOCKET_RECONNECT_OPTIONS,
+    auth: {
+      ...(token ? { token } : {}),
+      ...(tenantId ? { tenant_id: tenantId } : {}),
+      ...(options?.auth || {}),
+    },
+    extraHeaders: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options?.extraHeaders || {}),
+    },
+    ...options,
+  };
+};
+
 const dispatcherService = {
   getDispatchers,
   setDispatcherActive,
@@ -323,6 +354,8 @@ const dispatcherService = {
   subscribePaymentUpdates,
   subscribeReconnectionRecovery,
   DEFAULT_SOCKET_RECONNECT_OPTIONS,
+  DEFAULT_WEBSOCKET_AUTH_CONFIG,
+  getWebSocketAuthOptions,
 };
 
 

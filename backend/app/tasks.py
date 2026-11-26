@@ -4724,6 +4724,50 @@ HandleWebSocketFailuresTask = handle_websocket_failures_task
 Handle_websocket_failures_task = handle_websocket_failures_task
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Connection Authentication Celery Task
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.validate_connection_authentication_task",
+)
+def validate_connection_authentication_task(
+    token: Optional[str] = None,
+    tenant_id: Optional[Union[str, int]] = None,
+    role: Optional[str] = None,
+    allow_fallback: bool = True,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to validate WebSocket connection credentials and claims."""
+    from app.services.websocket_auth_service import validate_connection_authentication
+    return validate_connection_authentication(
+        token=token,
+        tenant_id=tenant_id,
+        role=role,
+        allow_fallback=allow_fallback,
+    )
+
+
+from app.services.websocket_auth_service import (
+    DEFAULT_WEBSOCKET_AUTH_CONFIG,
+    validate_connection_authentication,
+    get_websocket_auth_config,
+    get_websocket_auth_status,
+    WebSocketAuthService,
+    AddConnectionAuthentication,
+    Add_connection_authentication,
+    ValidateConnectionAuthentication,
+    Validate_connection_authentication,
+    get_connection_auth_status,
+    get_connection_auth_config,
+)
+
+ValidateConnectionAuthenticationTask = validate_connection_authentication_task
+Validate_connection_authentication_task = validate_connection_authentication_task
+AddConnectionAuthenticationTask = validate_connection_authentication_task
+Add_connection_authentication_task = validate_connection_authentication_task
+
+
 
 
 

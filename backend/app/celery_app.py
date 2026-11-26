@@ -1645,6 +1645,25 @@ from app.services.websocket_failure_service import (
 )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Connection Authentication Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_auth_service import (
+    DEFAULT_WEBSOCKET_AUTH_CONFIG,
+    validate_connection_authentication,
+    get_websocket_auth_config,
+    get_websocket_auth_status,
+    WebSocketAuthService,
+    AddConnectionAuthentication,
+    Add_connection_authentication,
+    ValidateConnectionAuthentication,
+    Validate_connection_authentication,
+    get_connection_auth_status,
+    get_connection_auth_config,
+)
+
+
 
 
 

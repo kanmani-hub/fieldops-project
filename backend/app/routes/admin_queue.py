@@ -2474,6 +2474,73 @@ def post_websocket_failures_report_endpoint(
     )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Connection Authentication Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/websocket/auth/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_auth_status_endpoint() -> dict:
+    """Return operational status for WebSocket connection authentication."""
+    from app.services.websocket_auth_service import get_websocket_auth_status
+    return get_websocket_auth_status()
+
+
+@router.get(
+    "/websocket/auth/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_auth_config_endpoint() -> dict:
+    """Return configuration contract for WebSocket connection authentication."""
+    from app.services.websocket_auth_service import get_websocket_auth_config
+    return get_websocket_auth_config()
+
+
+@router.post(
+    "/websocket/auth/verify",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_websocket_auth_verify_endpoint(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Validate WebSocket connection credentials and verified claims."""
+    from app.services.websocket_auth_service import validate_connection_authentication
+
+    token = payload.get("token")
+    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+    role = payload.get("role") or getattr(current_user, "role", "dispatcher")
+    allow_fallback = payload.get("allow_fallback", True)
+
+    return validate_connection_authentication(
+        token=token,
+        tenant_id=tenant_id,
+        role=role,
+        allow_fallback=allow_fallback,
+    )
+
+
+
 
 
 
