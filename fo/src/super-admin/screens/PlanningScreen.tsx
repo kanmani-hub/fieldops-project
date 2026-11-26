@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Image, ImageBackground, Modal, Pressable, RefreshControl, ScrollView, Text, View } from 'react-native';
+import { Alert, BackHandler, Image, ImageBackground, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, Text, View } from 'react-native';
 import { AlertCircle, ArrowDown, ArrowUp, Camera, Check, CheckCircle2, CircleMinus, CircleX, Clock3, CreditCard, Equal, Eye, FileText, Filter, Layers, Leaf, LoaderCircle, MapPin, Navigation, Package, RotateCcw, UserRound } from 'lucide-react-native';
 import { api } from '../api/client';
 import {
@@ -24,8 +24,10 @@ import {
 import { Card, EmptyState, ErrorBanner, Field, Pill, PrimaryButton, ScreenScroll } from '../components/UI';
 import { colors } from '../theme';
 import { dateTime, statusLabel, statusTone, text } from '../utils/format';
+import { EncodingType, StorageAccessFramework, documentDirectory, writeAsStringAsync } from 'expo-file-system/legacy';
 
 type Tab = 'total' | 'planned' | 'enroute' | 'inprogress' | 'completed' | 'declined' | 'escalations';
+type DetailTab = 'overview' | 'progress' | 'completion' | 'billing';
 type FilterState = { technician: string; service: string; status: string; priority: string; sla: string };
 const DEFAULT_FILTERS: FilterState = { technician: 'ALL', service: 'ALL', status: 'ALL', priority: 'ALL', sla: 'ALL' };
 
@@ -100,10 +102,12 @@ export default function PlanningScreen() {
   const [error, setError] = useState('');
   const [selectedJob, setSelectedJob] = useState<any | null>(null);
   const [detailJob, setDetailJob] = useState<any | null>(null);
+  const [detailTab, setDetailTab] = useState<DetailTab>('overview');
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailClosure, setDetailClosure] = useState<any | null>(null);
   const [detailSignature, setDetailSignature] = useState<any | null>(null);
   const [detailInvoice, setDetailInvoice] = useState<any | null>(null);
+  const [invoicePdfLoading, setInvoicePdfLoading] = useState(false);
   const [detailPayment, setDetailPayment] = useState<any | null>(null);
   const [detailFeedback, setDetailFeedback] = useState<any | null>(null);
   const [detailTimeline, setDetailTimeline] = useState<any[]>([]);
@@ -269,6 +273,7 @@ export default function PlanningScreen() {
     const requestId = ++detailRequestId.current;
     const jobId = job.id ?? job.job_id;
     setDetailJob(job);
+    setDetailTab('overview');
     setDetailClosure(null);
     setDetailSignature(null);
     setDetailInvoice(null);
@@ -330,6 +335,66 @@ export default function PlanningScreen() {
     setDetailTimeline([]);
     setDetailTimelineLoading(false);
   };
+
+  const downloadInvoicePdf = async () => {
+    const jobId = detailJob?.id ?? detailJob?.job_id;
+    if (!jobId || invoicePdfLoading) return;
+    setInvoicePdfLoading(true);
+    try {
+      const response = await api.get(`/api/v1/jobs/${jobId}/invoice/pdf`, {
+        responseType: Platform.OS === 'web' ? 'blob' : 'arraybuffer',
+      });
+      const fileName = `invoice_job_${jobId}.pdf`;
+      if (Platform.OS === 'web') {
+        const url = URL.createObjectURL(response.data as Blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return;
+      }
+
+      const bytes = new Uint8Array(response.data as ArrayBuffer);
+      let binary = '';
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      }
+      const base64 = btoa(binary);
+
+      if (Platform.OS === 'android') {
+        const permission = await StorageAccessFramework.requestDirectoryPermissionsAsync();
+        if (!permission.granted) return;
+        const savedFile = await StorageAccessFramework.createFileAsync(
+          permission.directoryUri,
+          fileName.replace(/\.pdf$/i, ''),
+          'application/pdf',
+        );
+        await writeAsStringAsync(savedFile, base64, { encoding: EncodingType.Base64 });
+        Alert.alert('Invoice downloaded', 'The PDF invoice was saved to the folder you selected.');
+      } else {
+        if (!documentDirectory) throw new Error('Invoice storage is unavailable on this device.');
+        const savedFile = `${documentDirectory}${fileName}`;
+        await writeAsStringAsync(savedFile, base64, { encoding: EncodingType.Base64 });
+        await Linking.openURL(savedFile);
+      }
+    } catch (error) {
+      Alert.alert('Unable to download invoice', error instanceof Error ? error.message : 'Please try again.');
+    } finally {
+      setInvoicePdfLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!detailJob) return;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      closeJobDetails();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [detailJob]);
 
   const submitEscalationCancel = async () => {
     const id = cancelEscalationJob?.id ?? cancelEscalationJob?.job_id;
@@ -618,36 +683,45 @@ export default function PlanningScreen() {
         </View>
       </View>
     </Modal>
-    <Modal visible={!!detailJob} animationType="slide" transparent onRequestClose={closeJobDetails}>
-      <View style={{ flex: 1, backgroundColor: 'rgba(7,25,16,.58)', justifyContent: 'flex-end' }}>
-        <View style={{ height: '96%', backgroundColor: '#F3F8F5', borderTopLeftRadius: 26, borderTopRightRadius: 26, overflow: 'hidden' }}>
-          <View style={{ paddingHorizontal: 18, paddingTop: 16, paddingBottom: 14, backgroundColor: colors.white, borderBottomWidth: 1, borderBottomColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+    {detailJob ? <View style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 100, elevation: 100, backgroundColor: '#F3F8F5' }}>
+        <View style={{ flex: 1, backgroundColor: '#F3F8F5', overflow: 'hidden' }}>
+          <View style={{ paddingHorizontal: 18, paddingTop: 16, paddingBottom: 14, backgroundColor: colors.forestDark, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
             <View style={{ flex: 1 }}>
-              <Text style={{ color: colors.muted, fontSize: 10, fontWeight: '900', letterSpacing: 1 }}>PLANNING · JOB RECORD</Text>
-              <Text style={{ color: colors.ink, fontSize: 22, fontWeight: '900', marginTop: 3 }}>Job #{detailJob?.id ?? detailJob?.job_id}</Text>
-              {detailLoading ? <Text style={{ color: colors.muted, fontSize: 10, marginTop: 2 }}>Refreshing job information…</Text> : null}
+              <Text style={{ color: '#A7D7BC', fontSize: 10, fontWeight: '900', letterSpacing: 1 }}>SUPER ADMIN</Text>
+              <Text style={{ color: colors.white, fontSize: 22, fontWeight: '900', marginTop: 3 }}>Job Details</Text>
+              <Text style={{ color: '#D2E7DA', fontSize: 11, marginTop: 2 }}>Job #{detailJob?.id ?? detailJob?.job_id}{detailLoading ? ' · Refreshing…' : ''}</Text>
             </View>
-            <Pressable accessibilityRole="button" accessibilityLabel="Close job details" onPress={closeJobDetails} style={{ minWidth: 62, height: 42, paddingHorizontal: 13, borderRadius: 14, backgroundColor: '#EAF4EE', alignItems: 'center', justifyContent: 'center' }}>
-              <Text style={{ color: colors.forest, fontSize: 13, fontWeight: '900' }}>Close</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Back to jobs" onPress={closeJobDetails} style={{ minWidth: 74, height: 42, paddingHorizontal: 13, borderRadius: 14, backgroundColor: 'rgba(255,255,255,.14)', alignItems: 'center', justifyContent: 'center' }}>
+              <Text style={{ color: colors.white, fontSize: 13, fontWeight: '900' }}>‹ Jobs</Text>
             </Pressable>
           </View>
-          <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 34, gap: 13 }} showsVerticalScrollIndicator={false}>
-            <View style={{ padding: 16, borderRadius: 20, backgroundColor: colors.forestDark, gap: 11 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
-                <View style={{ flex: 1, gap: 4 }}>
-                  <Text style={{ color: '#A7D7BC', fontSize: 10, fontWeight: '900', letterSpacing: 1 }}>SERVICE REQUEST</Text>
-                  <Text style={{ color: colors.white, fontSize: 18, lineHeight: 23, fontWeight: '900' }}>{text(detailJob?.service_type || detailJob?.required_skill, 'Service request')}</Text>
-                  <Text style={{ color: '#D2E7DA', fontSize: 12 }}>{text(detailJob?.customer_name || detailJob?.customer)}</Text>
-                </View>
-                <Pill label={statusLabel(detailJob?.status || detailJob?.job_status)} tone={statusTone(detailJob?.status || detailJob?.job_status)} />
-              </View>
-              <View style={{ height: 1, backgroundColor: 'rgba(255,255,255,.18)' }} />
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 8 }}>
-                <View style={{ flex: 1 }}><Text style={{ color: '#A7D7BC', fontSize: 9, fontWeight: '800' }}>PRIORITY</Text><Text style={{ color: colors.white, fontSize: 12, fontWeight: '800', marginTop: 3 }}>{statusLabel(detailJob?.priority)}</Text></View>
-                <View style={{ flex: 1 }}><Text style={{ color: '#A7D7BC', fontSize: 9, fontWeight: '800' }}>TECHNICIAN</Text><Text numberOfLines={2} style={{ color: colors.white, fontSize: 12, fontWeight: '800', marginTop: 3 }}>{assignedTechnicianName(detailJob, technicianOptions)}</Text></View>
-              </View>
+          <View style={{ marginHorizontal: 14, marginTop: 12, padding: 14, borderRadius: 20, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', gap: 11 }}>
+            <View style={{ width: 46, height: 46, borderRadius: 14, backgroundColor: '#E9F8EF', alignItems: 'center', justifyContent: 'center' }}><FileText size={23} color={colors.forest} /></View>
+            <View style={{ flex: 1, gap: 3 }}>
+              <Text style={{ color: colors.ink, fontSize: 18, fontWeight: '900' }}>Job #{detailJob?.id ?? detailJob?.job_id}</Text>
+              <Text style={{ color: colors.text, fontSize: 12 }}>{text(detailJob?.service_type || detailJob?.required_skill, 'Service request')}</Text>
+              <Text style={{ color: colors.muted, fontSize: 10 }}>Created {dateTime(detailJob?.created_at)}</Text>
             </View>
-
+            <Pill label={statusLabel(detailJob?.status || detailJob?.job_status)} tone={statusTone(detailJob?.status || detailJob?.job_status)} />
+          </View>
+          <View style={{ flexDirection: 'row', marginHorizontal: 12, marginTop: 12, padding: 4, borderRadius: 18, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border }}>
+            {([
+              ['overview', 'Overview', Layers],
+              ['progress', 'Progress', UserRound],
+              ['completion', 'Completion', CheckCircle2],
+              ['billing', 'Billing', CreditCard],
+            ] as const).map(([key, label, Icon]) => {
+              const selected = detailTab === key;
+              return <Pressable key={key} accessibilityRole="tab" accessibilityState={{ selected }} onPress={() => setDetailTab(key)} style={{ flex: 1, minHeight: 57, paddingHorizontal: 2, paddingVertical: 5, borderRadius: 14, alignItems: 'center', justifyContent: 'center', gap: 3, backgroundColor: selected ? '#E9F8EF' : 'transparent', borderBottomWidth: selected ? 2 : 0, borderBottomColor: selected ? '#07965B' : 'transparent' }}><Icon size={19} color={selected ? colors.forest : colors.muted} /><Text numberOfLines={1} style={{ color: selected ? colors.forest : colors.text, fontSize: 9, fontWeight: selected ? '900' : '700' }}>{label}</Text></Pressable>;
+            })}
+          </View>
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 14, paddingBottom: 30, gap: 13 }} showsVerticalScrollIndicator={false}>
+            {detailTab === 'overview' ? <>
+              <Card style={{ padding: 15, gap: 10 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9 }}><View style={{ width: 36, height: 36, borderRadius: 12, backgroundColor: '#EAF4EE', alignItems: 'center', justifyContent: 'center' }}><Layers size={18} color={colors.forest} /></View><Text style={{ color: colors.ink, fontSize: 15, fontWeight: '900' }}>Job Overview</Text></View>
+                <View style={{ paddingVertical: 9, borderTopWidth: 1, borderTopColor: colors.softBorder, flexDirection: 'row', alignItems: 'center', gap: 10 }}><View style={{ width: 42, height: 42, borderRadius: 13, backgroundColor: '#EAF4EE', alignItems: 'center', justifyContent: 'center' }}><FileText size={20} color={colors.forest} /></View><View style={{ flex: 1 }}><Text style={{ color: colors.ink, fontSize: 14, fontWeight: '900' }}>{text(detailJob?.service_type || detailJob?.required_skill, 'Service request')}</Text><Text style={{ color: colors.muted, fontSize: 11 }}>{text(detailJob?.issue_description, 'Service details')}</Text></View><Pill label={statusLabel(detailJob?.priority)} tone="amber" /></View>
+                {[[UserRound, 'Customer', detailJob?.customer_name || detailJob?.customer], [UserRound, 'Technician', assignedTechnicianName(detailJob, technicianOptions)], [Clock3, 'Preferred visit', detailJob?.preferred_service_date ? `${dateTime(detailJob.preferred_service_date)}${detailJob?.preferred_service_time ? ` · ${formatPreferredTime(detailJob.preferred_service_time)}` : ''}` : null], [Clock3, 'Duration', detailClosure?.work_report?.duration_minutes != null ? `${detailClosure.work_report.duration_minutes} minutes` : null]].map(([Icon, label, value]: any) => value ? <View key={label} style={{ borderTopWidth: 1, borderTopColor: colors.softBorder, paddingTop: 9, flexDirection: 'row', alignItems: 'center', gap: 10 }}><View style={{ width: 36, height: 36, borderRadius: 12, backgroundColor: '#F0F8F3', alignItems: 'center', justifyContent: 'center' }}><Icon size={18} color={colors.forest} /></View><View style={{ flex: 1 }}><Text style={{ color: colors.muted, fontSize: 10 }}>{label}</Text><Text style={{ color: colors.ink, fontSize: 12, fontWeight: '700', marginTop: 2 }}>{String(value)}</Text></View></View> : null)}
+              </Card>
             <Card style={{ padding: 15, gap: 12 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9 }}><View style={{ width: 36, height: 36, borderRadius: 12, backgroundColor: '#EAF4EE', alignItems: 'center', justifyContent: 'center' }}><FileText size={18} color={colors.forest} /></View><View><Text style={{ color: colors.ink, fontSize: 15, fontWeight: '900' }}>Request details</Text><Text style={{ color: colors.muted, fontSize: 10, marginTop: 2 }}>Customer, service and booking information</Text></View></View>
               <View style={{ gap: 0 }}>
@@ -662,8 +736,14 @@ export default function PlanningScreen() {
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 8, padding: 11, borderRadius: 13, backgroundColor: '#F3F8F5' }}><MapPin size={16} color={colors.forest} /><Text selectable style={{ flex: 1, color: colors.text, fontSize: 12, lineHeight: 18 }}>{text(detailJob?.site_address || detailJob?.location, 'Service location not recorded')}</Text></View>
             </Card>
+              <Card style={{ padding: 15, gap: 10 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9 }}><View style={{ width: 36, height: 36, borderRadius: 12, backgroundColor: '#EAF4EE', alignItems: 'center', justifyContent: 'center' }}><UserRound size={18} color={colors.forest} /></View><Text style={{ color: colors.ink, fontSize: 15, fontWeight: '900' }}>Assignment Details</Text></View>
+                <View style={{ borderTopWidth: 1, borderTopColor: colors.softBorder, paddingTop: 10 }}><Text style={{ color: colors.muted, fontSize: 10 }}>Assigned Technician</Text><Text style={{ color: colors.ink, fontSize: 13, fontWeight: '800', marginTop: 3 }}>{assignedTechnicianName(detailJob, technicianOptions)}</Text></View>
+                {detailJob?.assigned_at ? <View style={{ borderTopWidth: 1, borderTopColor: colors.softBorder, paddingTop: 10 }}><Text style={{ color: colors.muted, fontSize: 10 }}>Assignment Confirmed</Text><Text style={{ color: colors.ink, fontSize: 12, fontWeight: '700', marginTop: 3 }}>{dateTime(detailJob.assigned_at)}</Text></View> : null}
+              </Card>
+            </> : null}
 
-            <Card style={{ padding: 15, gap: 12 }}>
+            {detailTab === 'progress' ? <Card style={{ padding: 15, gap: 12 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9 }}><View style={{ width: 36, height: 36, borderRadius: 12, backgroundColor: '#EDF4FF', alignItems: 'center', justifyContent: 'center' }}><Clock3 size={18} color={colors.blue} /></View><View><Text style={{ color: colors.ink, fontSize: 15, fontWeight: '900' }}>Job progress</Text><Text style={{ color: colors.muted, fontSize: 10, marginTop: 2 }}>Status timestamps and service deadline</Text></View></View>
               {detailTimelineLoading ? <Text style={{ color: colors.muted, fontSize: 11, paddingVertical: 8 }}>Loading job activity…</Text> : detailTimeline.length ? detailTimeline.map((event: any, index: number) => <View key={String(event.id || `${event.title}-${index}`)} style={{ flexDirection: 'row', gap: 10, minHeight: 42 }}><View style={{ width: 22, alignItems: 'center' }}><View style={{ width: 11, height: 11, borderRadius: 6, marginTop: 4, backgroundColor: event.is_current_state ? colors.green : colors.blue }} />{index < detailTimeline.length - 1 ? <View style={{ width: 1, flex: 1, backgroundColor: colors.border }} /> : null}</View><View style={{ flex: 1, paddingBottom: 10 }}><Text style={{ color: colors.ink, fontSize: 12, fontWeight: '900' }}>{text(event.title, 'Job update')}</Text>{event.description ? <Text style={{ color: colors.text, fontSize: 11, lineHeight: 16, marginTop: 2 }}>{event.description}</Text> : null}<Text style={{ color: colors.muted, fontSize: 10, marginTop: 3 }}>{dateTime(event.timestamp)}{event.actor_name ? ` · ${event.actor_name}` : ''}</Text></View></View>) : <View style={{ gap: 0 }}>{[
                 ['Created', detailJob?.created_at], ['Assigned', detailJob?.assigned_at], ['En route', detailJob?.en_route_at], ['Arrived on site', detailJob?.on_site_at], ['Work started', detailJob?.work_started_at], ['Completed', detailJob?.completed_at || detailJob?.closed_at], ['Cancelled', detailJob?.cancelled_at],
@@ -671,9 +751,9 @@ export default function PlanningScreen() {
               {detailJob?.sla_deadline ? <View style={{ padding: 11, borderRadius: 12, backgroundColor: '#EDF4FF', flexDirection: 'row', alignItems: 'center', gap: 8 }}><Clock3 size={15} color={colors.blue} /><View><Text style={{ color: colors.blue, fontSize: 9, fontWeight: '900' }}>SLA DEADLINE</Text><Text style={{ color: colors.ink, fontSize: 11, fontWeight: '700', marginTop: 2 }}>{dateTime(detailJob.sla_deadline)}</Text></View></View> : null}
               {detailJob?.rejection_reason ? <View style={{ padding: 11, borderRadius: 12, backgroundColor: '#FFF5F5' }}><Text style={{ color: colors.red, fontSize: 10, fontWeight: '900' }}>REJECTION REASON</Text><Text style={{ color: colors.text, fontSize: 12, lineHeight: 18, marginTop: 4 }}>{detailJob.rejection_reason}</Text></View> : null}
               {detailJob?.cancellation_reason ? <View style={{ padding: 11, borderRadius: 12, backgroundColor: '#FFF5F5' }}><Text style={{ color: colors.red, fontSize: 10, fontWeight: '900' }}>CANCELLATION REASON</Text><Text style={{ color: colors.text, fontSize: 12, lineHeight: 18, marginTop: 4 }}>{detailJob.cancellation_reason}</Text></View> : null}
-            </Card>
+            </Card> : null}
 
-            {String(detailJob?.status || detailJob?.job_status || '').toUpperCase() === 'COMPLETED' ? (
+            {detailTab === 'completion' ? (String(detailJob?.status || detailJob?.job_status || '').toUpperCase() === 'COMPLETED' ? (
               <Card style={{ padding: 15, gap: 12, borderColor: '#B9E3CB' }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9 }}><View style={{ width: 36, height: 36, borderRadius: 12, backgroundColor: '#E9FBF3', alignItems: 'center', justifyContent: 'center' }}><CheckCircle2 size={19} color="#087B58" /></View><View><Text style={{ color: colors.ink, fontSize: 15, fontWeight: '900' }}>Completion record</Text><Text style={{ color: colors.muted, fontSize: 10, marginTop: 2 }}>Work report, evidence and customer sign-off</Text></View></View>
                 {detailCompletionLoading ? <Text style={{ color: colors.muted, fontSize: 12, paddingVertical: 8 }}>Loading completion report and signature…</Text> : null}
@@ -691,20 +771,20 @@ export default function PlanningScreen() {
                 {detailSignature?.signature_data ? <View style={{ gap: 7 }}><Text style={{ color: colors.ink, fontSize: 12, fontWeight: '900' }}>Customer signature</Text><View style={{ minHeight: 100, borderWidth: 1, borderColor: colors.border, borderRadius: 13, backgroundColor: colors.white, padding: 8, alignItems: 'center', justifyContent: 'center' }}><Image source={{ uri: detailSignature.signature_data }} resizeMode="contain" style={{ width: '100%', height: 100 }} /></View><Text style={{ color: colors.muted, fontSize: 10 }}>Signed {dateTime(detailSignature.signed_at)}</Text></View> : null}
                 {!detailCompletionLoading && !detailSignature && !detailCompletionMessage ? <View style={{ padding: 11, borderRadius: 12, backgroundColor: '#FFF9ED', flexDirection: 'row', alignItems: 'center', gap: 8 }}><AlertCircle size={15} color={colors.amber} /><Text style={{ flex: 1, color: colors.text, fontSize: 11, lineHeight: 16 }}>Customer signature is not available for this job.</Text></View> : null}
               </Card>
-            ) : null}
-            {String(detailJob?.status || detailJob?.job_status || '').toUpperCase() === 'COMPLETED' ? <Card style={{ padding: 15, gap: 12 }}>
+            ) : <Card style={{ padding: 16, gap: 7 }}><Text style={{ color: colors.ink, fontSize: 15, fontWeight: '900' }}>Completion record</Text><Text style={{ color: colors.muted, fontSize: 12, lineHeight: 18 }}>This section will be available after the job is completed.</Text></Card>) : null}
+            {detailTab === 'billing' && String(detailJob?.status || detailJob?.job_status || '').toUpperCase() === 'COMPLETED' ? <Card style={{ padding: 15, gap: 12 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9 }}><View style={{ width: 36, height: 36, borderRadius: 12, backgroundColor: '#EAF4EE', alignItems: 'center', justifyContent: 'center' }}><CreditCard size={18} color={colors.forest} /></View><View><Text style={{ color: colors.ink, fontSize: 15, fontWeight: '900' }}>Billing & feedback</Text><Text style={{ color: colors.muted, fontSize: 10, marginTop: 2 }}>Invoice, payment record and customer rating</Text></View></View>
               <View style={{ flexDirection: 'row', gap: 8 }}>
                 <View style={{ flex: 1, padding: 11, borderRadius: 13, backgroundColor: '#F3F8F5' }}><Text style={{ color: colors.muted, fontSize: 9, fontWeight: '900' }}>INVOICE TOTAL</Text><Text style={{ color: colors.ink, fontSize: 15, fontWeight: '900', marginTop: 4 }}>{detailInvoice?.total_amount == null ? 'Not available' : `₹${Number(detailInvoice.total_amount).toLocaleString('en-IN')}`}</Text></View>
                 <View style={{ flex: 1, padding: 11, borderRadius: 13, backgroundColor: '#F3F8F5' }}><Text style={{ color: colors.muted, fontSize: 9, fontWeight: '900' }}>PAYMENT</Text><Text style={{ color: colors.ink, fontSize: 13, fontWeight: '900', marginTop: 5 }}>{statusLabel(detailPayment?.status || 'UNAVAILABLE')}</Text></View>
               </View>
+              {detailInvoice ? <PrimaryButton title="Download invoice PDF" onPress={() => void downloadInvoicePdf()} loading={invoicePdfLoading} /> : <Text style={{ color: colors.muted, fontSize: 11 }}>The invoice PDF will be available when an invoice has been generated.</Text>}
               {detailInvoice ? <View style={{ gap: 5 }}><Text style={{ color: colors.ink, fontSize: 11, fontWeight: '900' }}>Invoice breakdown</Text><Text style={{ color: colors.text, fontSize: 11, lineHeight: 17 }}>Labour ₹{Number(detailInvoice.labour_cost || 0).toLocaleString('en-IN')}  ·  Materials ₹{Number(detailInvoice.material_cost || 0).toLocaleString('en-IN')}</Text><Text style={{ color: colors.text, fontSize: 11, lineHeight: 17 }}>Subtotal ₹{Number(detailInvoice.subtotal || 0).toLocaleString('en-IN')}  ·  GST ₹{Number(detailInvoice.gst_amount || 0).toLocaleString('en-IN')}</Text></View> : null}
               {detailFeedback?.has_feedback && detailFeedback?.feedback ? <View style={{ padding: 11, borderRadius: 13, backgroundColor: '#FFF9ED', gap: 4 }}><Text style={{ color: colors.amber, fontSize: 12, fontWeight: '900' }}>{'★'.repeat(Math.max(0, Math.min(5, Number(detailFeedback.feedback.rating) || 0)))} <Text style={{ color: colors.ink }}>{detailFeedback.feedback.rating}/5 customer rating</Text></Text>{detailFeedback.feedback.comment ? <Text style={{ color: colors.text, fontSize: 12, lineHeight: 18 }}>{detailFeedback.feedback.comment}</Text> : <Text style={{ color: colors.muted, fontSize: 11 }}>No written comment</Text>}</View> : detailFeedback && !detailFeedback.has_feedback ? <Text style={{ color: colors.muted, fontSize: 11 }}>Customer feedback has not been submitted.</Text> : null}
-            </Card> : null}
+            </Card> : detailTab === 'billing' ? <Card style={{ padding: 16, gap: 7 }}><Text style={{ color: colors.ink, fontSize: 15, fontWeight: '900' }}>Billing & feedback</Text><Text style={{ color: colors.muted, fontSize: 12, lineHeight: 18 }}>Billing and customer feedback will appear after the job is completed.</Text></Card> : null}
           </ScrollView>
         </View>
-      </View>
-    </Modal>
+      </View> : null}
     <Modal visible={!!cancelEscalationJob} animationType="slide" transparent onRequestClose={() => setCancelEscalationJob(null)}>
       <View style={{ flex: 1, backgroundColor: 'rgba(7,25,16,.55)', justifyContent: 'flex-end' }}>
         <View style={{ backgroundColor: '#F7FBF5', borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 18, gap: 12 }}>

@@ -143,6 +143,9 @@ const CustomerSettingsPage = lazy(
 const CustomerSupportPage = lazy(
   () => import("./pages/customer/CustomerSupportPage"),
 );
+const HeadPortal = lazy(
+  () => import("./pages/head/HeadPortal").then((m) => ({ default: m.HeadPortal })),
+);
 
 interface NotificationItem {
   id: string | number;
@@ -687,16 +690,17 @@ function AppInner() {
     };
   }, [isTechnician, user?.tenant_id]);
 
+  const isHead = userRole === "head";
+
   const isSuperAdmin =
-    userRole === "super_admin" ||
+    (userRole === "super_admin" ||
     userRole === "admin" ||
-    userRole === "head" ||
     (user as any)?.role === "super_admin" ||
     (user as any)?.role === "admin" ||
-    (user as any)?.is_superadmin === true;
+    (user as any)?.is_superadmin === true) && !isHead;
 
   const isAdminOrDispatcher =
-    !isTechnician && !isCustomer;
+    !isTechnician && !isCustomer && !isHead;
 
   const [headerSearch, setHeaderSearch] = useState("");
   const [profileProvisioningRequest, setProfileProvisioningRequest] = useState<{
@@ -752,7 +756,7 @@ function AppInner() {
     useState<string | null>(null);
 
   const [customerLocation, setCustomerLocation] =
-    useState("Chennai, Tamil Nadu");
+    useState("Set service location");
 
   const [customerName, setCustomerName] = useState(() =>
     `${user?.first_name || ""} ${user?.last_name || ""}`.trim()
@@ -764,13 +768,15 @@ function AppInner() {
 
     const handleProfileData = (profile: any) => {
       if (!profile) return;
-      if (profile.city && profile.state) {
-        setCustomerLocation(`${profile.city}, ${profile.state}`);
-      } else if (profile.city) {
-        setCustomerLocation(profile.city);
-      } else if (profile.address) {
-        setCustomerLocation(profile.address);
-      }
+      const cityAndState = [profile.city, profile.state]
+        .map((part: unknown) => String(part ?? "").trim())
+        .filter(Boolean)
+        .join(", ");
+      const address = [profile.address, profile.pincode]
+        .map((part: unknown) => String(part ?? "").trim())
+        .filter(Boolean)
+        .join(", ");
+      setCustomerLocation(cityAndState || address || "Set service location");
 
       const updatedName =
         profile.full_name?.trim() ||
@@ -1545,6 +1551,28 @@ function AppInner() {
 
     return base;
   };
+
+  if (isHead) {
+    return (
+      <Suspense fallback={<LoadingSpinner />}>
+        <HeadPortal
+          user={user}
+          onLogout={logout}
+          notifications={notifications as any}
+          onOpenNotifications={() => setIsNotificationDrawerOpen(true)}
+        />
+        <NotificationDrawer
+          isOpen={isNotificationDrawerOpen}
+          onClose={() => setIsNotificationDrawerOpen(false)}
+          notifications={notifications as any}
+          onNotificationClick={handleNotificationClick}
+          onMarkAllAsRead={handleMarkAllAsRead}
+          onDismissNotification={handleDismissNotification}
+        />
+        <ToastContainer onNavigate={handleToastNavigate} />
+      </Suspense>
+    );
+  }
 
   return (
     <div

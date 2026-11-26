@@ -27,6 +27,8 @@ import {
   UserRound,
   Wrench,
   Workflow,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import {
   getAgentTracking,
@@ -467,6 +469,8 @@ function JobProgressDetail({
   );
 }
 
+const PAGE_SIZE = 10;
+
 export default function AgentTrackingPage() {
   const [data, setData] = useState<AgentTrackingResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -474,6 +478,7 @@ export default function AgentTrackingPage() {
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<FilterKey>("all");
   const [search, setSearch] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
   const [selectedJob, setSelectedJob] = useState<AgentTrackingJobDetail | null>(null);
   const [detailError, setDetailError] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
@@ -577,6 +582,10 @@ export default function AgentTrackingPage() {
     return () => window.clearInterval(timer);
   }, [load]);
 
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filter, search]);
+
   const filteredJobs = useMemo(() => {
     const query = search.trim().toLowerCase();
     return (data?.jobs ?? []).filter((job) => {
@@ -593,10 +602,19 @@ export default function AgentTrackingPage() {
         job.customer_name ?? "",
         job.location ?? "",
         job.current_agent,
+        job.tenant_id ?? "",
       ].some((value) => value.toLowerCase().includes(query));
       return matchesFilter && matchesSearch;
     });
   }, [data?.jobs, filter, search]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredJobs.length / PAGE_SIZE));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const startIndex = (safeCurrentPage - 1) * PAGE_SIZE;
+  const endIndex = Math.min(startIndex + PAGE_SIZE, filteredJobs.length);
+  const paginatedJobs = useMemo(() => {
+    return filteredJobs.slice(startIndex, endIndex);
+  }, [filteredJobs, startIndex, endIndex]);
 
   return (
     <main className="agent-tracking-page">
@@ -642,9 +660,35 @@ export default function AgentTrackingPage() {
         ) : error ? (
           <div className="agent-track-message is-error"><AlertCircle size={20} />{error}<button onClick={() => void load()}>Try again</button></div>
         ) : filteredJobs.length ? (
+          <>
           <div className="agent-track-table-wrap"><table className="agent-track-table"><thead><tr><th>Job ID</th><th>Customer</th><th>Job Type</th><th>Agent Pipeline</th><th>Progress</th><th>Status</th><th>Last Update</th><th>Action</th></tr></thead><tbody>
-            {filteredJobs.map((job) => { const progress = progressFor(job); return <tr key={job.job_id}>
-              <td><strong className="agent-track-table-id">#{job.job_number}</strong></td>
+            {paginatedJobs.map((job) => { const progress = progressFor(job); return <tr key={job.job_id}>
+              <td>
+                <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+                  <strong className="agent-track-table-id">#{job.job_number}</strong>
+                  {job.tenant_id ? (
+                    <span
+                      style={{
+                        display: "inline-block",
+                        fontSize: "11px",
+                        lineHeight: "1.2",
+                        padding: "1px 6px",
+                        borderRadius: "4px",
+                        background: "#E0F2FE",
+                        color: "#0369A1",
+                        fontWeight: 600,
+                        maxWidth: "140px",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={`Organization: ${job.tenant_id}`}
+                    >
+                      {job.tenant_id}
+                    </span>
+                  ) : null}
+                </div>
+              </td>
               <td><div className="agent-track-customer"><span className="agent-track-customer-avatar"><UserRound size={17}/></span><span><strong>{job.customer_name || "Customer"}</strong><small>{job.location || "Location not recorded"}</small></span></div></td>
               <td><span className="agent-track-service"><Wrench size={14}/><span>{job.service_type || "Service"}</span></span></td>
               <td><div className="agent-track-pipeline">{job.stages.filter((stage) => stage.key !== "technician_work").slice(0, 6).map((stage, index, stages) => <div className={`agent-track-pipeline-step state-${stage.state}`} key={stage.key}><span>{stageIcon(stage)}</span><small>{({intake:"Intake",planning:"Planning",dispatch:"Dispatcher",communication:"Comm.",sentiment:"Sentiment",closure:"Closure"} as Record<string,string>)[stage.key] || stage.label}</small>{index < stages.length - 1 ? <i/> : null}</div>)}</div></td>
@@ -653,6 +697,68 @@ export default function AgentTrackingPage() {
               <td className="agent-track-update">{formatTimestamp(job.updated_at)}</td><td><button className="agent-track-view" onClick={() => void openJob(job)}>View Tracking <span>→</span></button></td>
             </tr>; })}
           </tbody></table></div>
+
+          <div className="agent-track-pagination">
+            <div className="agent-track-pagination-info">
+              Showing <strong>{filteredJobs.length === 0 ? 0 : startIndex + 1}</strong> to{" "}
+              <strong>{endIndex}</strong> of <strong>{filteredJobs.length}</strong> jobs
+            </div>
+            {totalPages > 1 && (
+              <div className="agent-track-pagination-actions">
+                <button
+                  type="button"
+                  className="agent-track-page-btn"
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={safeCurrentPage <= 1}
+                  title="Previous Page"
+                >
+                  <ChevronLeft size={16} />
+                  Previous
+                </button>
+
+                {Array.from({ length: totalPages }, (_, i) => i + 1)
+                  .filter((p) => {
+                    return (
+                      p === 1 ||
+                      p === totalPages ||
+                      Math.abs(p - safeCurrentPage) <= 1
+                    );
+                  })
+                  .map((page, idx, arr) => {
+                    const prev = arr[idx - 1];
+                    const showEllipsis = prev && page - prev > 1;
+                    return (
+                      <span key={page} style={{ display: "inline-flex", alignItems: "center" }}>
+                        {showEllipsis && (
+                          <span style={{ padding: "0 4px", color: "#94A3B8" }}>…</span>
+                        )}
+                        <button
+                          type="button"
+                          className={`agent-track-page-number ${
+                            safeCurrentPage === page ? "is-active" : ""
+                          }`}
+                          onClick={() => setCurrentPage(page)}
+                        >
+                          {page}
+                        </button>
+                      </span>
+                    );
+                  })}
+
+                <button
+                  type="button"
+                  className="agent-track-page-btn"
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={safeCurrentPage >= totalPages}
+                  title="Next Page"
+                >
+                  Next
+                  <ChevronRight size={16} />
+                </button>
+              </div>
+            )}
+          </div>
+          </>
         ) : (
           <div className="agent-track-empty">
             <Workflow size={28} />

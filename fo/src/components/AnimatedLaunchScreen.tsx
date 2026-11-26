@@ -193,29 +193,49 @@ export function AnimatedLaunchScreen({
     wordmarkY
   ]);
 
+
   useEffect(() => {
-    if (!readyToExit || !entranceComplete || exitStarted.current) return;
+    if (!readyToExit || !entranceComplete || completionCalled.current) {
+      return;
+    }
+
+    if (exitStarted.current) {
+      return;
+    }
+
     exitStarted.current = true;
+
     const exit = Animated.timing(screenOpacity, {
       toValue: 0,
       duration: reduceMotion ? 140 : 380,
       easing: Easing.inOut(Easing.quad),
-      useNativeDriver: true
+      useNativeDriver: true,
     });
+
     exit.start(({ finished }) => {
       if (finished && !completionCalled.current) {
         completionCalled.current = true;
         onExitComplete();
+      } else if (!finished && !completionCalled.current) {
+        exitStarted.current = false;
       }
     });
-    return () => exit.stop();
+
+    return () => {
+      exit.stop();
+
+      if (!completionCalled.current) {
+        exitStarted.current = false;
+      }
+    };
   }, [
     readyToExit,
     entranceComplete,
     reduceMotion,
     screenOpacity,
-    onExitComplete
+    onExitComplete,
   ]);
+
 
   return (
     <Animated.View

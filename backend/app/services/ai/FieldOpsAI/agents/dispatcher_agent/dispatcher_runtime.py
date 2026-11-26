@@ -41,6 +41,7 @@ from app.services.ai.FieldOpsAI.agents.dispatcher_agent.dispatcher_agent import 
 from app.services.ai.FieldOpsAI.graph.planning_graph import planning_graph
 
 from app.services.timer_service import TimerService
+from app.services.dispatch_scheduling import overnight_dispatch_due_at
 from app.services.planning_output_log import write_planning_output
 
 from app.services.force_assignment_service import (
@@ -164,6 +165,8 @@ class DispatcherRuntime:
     def _pending_offer_identities(job_id: int) -> set[tuple[str, int]]:
         """Read persisted PENDING offers; DB state wins over delivery errors."""
         with SessionLocal() as db:
+            if not hasattr(db, "query"):
+                return set()
             rows = (
                 db.query(models.JobAssignment.tenant_id, models.JobAssignment.technician_id)
                 .filter(
@@ -201,6 +204,22 @@ class DispatcherRuntime:
             status = str(getattr(job, "status", "") or "").strip().upper()
             if status not in OFFERABLE_JOB_STATUSES:
                 return {"job_id": job_id, "status": "NOT_UNASSIGNED", "candidates": []}
+            overnight_due_at = overnight_dispatch_due_at(
+                getattr(job, "created_at", None),
+                getattr(job, "preferred_service_timezone", None),
+            )
+            if overnight_due_at is not None and datetime.now(timezone.utc) < overnight_due_at:
+                logger.info(
+                    "overnight_dispatch_queued job_id=%s dispatch_due_at=%s",
+                    job_id,
+                    overnight_due_at.isoformat(),
+                )
+                return {
+                    "job_id": job_id,
+                    "status": "SCHEDULED",
+                    "dispatch_due_at": overnight_due_at.isoformat(),
+                    "candidates": [],
+                }
             job_state = self._job_to_state(job)
             previous = getattr(job, "dispatch_state", None) or {}
             # JobAssignment is authoritative for who has already received an
@@ -212,7 +231,7 @@ class DispatcherRuntime:
                     models.JobAssignment.assigned_at.isnot(None),
                 ).all()
                 if row.tenant_id is not None and row.technician_id is not None
-            }
+            } if hasattr(db, "query") else set()
             attempted_identities.update(self._identity_set(previous.get("attempted_technicians")))
             workload_excluded_identities = self._identity_set(
                 previous.get("workload_excluded_technicians")
@@ -1004,16 +1023,17 @@ class DispatcherRuntime:
                 )
                 .first()
             )
-            if offer is None:
-                db.add(models.JobAssignment(
-                    job_id=job_id,
-                    tenant_id=str(technician.tenant_id),
-                    technician_id=technician.technician_id,
-                    rank=int(job_state.get("_candidate_rank") or candidate.get("rank") or 1),
-                    status="PENDING",
-                    assigned_at=datetime.now(timezone.utc),
-                    is_current=True,
-                ))
+            if offer is not None:
+                raise RuntimeError("job_already_assigned")
+            db.add(models.JobAssignment(
+                job_id=job_id,
+                tenant_id=str(technician.tenant_id),
+                technician_id=technician.technician_id,
+                rank=int(job_state.get("_candidate_rank") or candidate.get("rank") or 1),
+                status="PENDING",
+                assigned_at=datetime.now(timezone.utc),
+                is_current=True,
+            ))
 
             logger.info(
                 "JOB STATUS UPDATED | "

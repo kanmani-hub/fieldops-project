@@ -45,6 +45,15 @@ function formatCountdown(seconds: number | null): string {
   return `${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`;
 }
 
+function formatScheduleDate(value: string): string {
+  const datePart = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (datePart) return `${datePart[3]}/${datePart[2]}/${datePart[1]}`;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : parsed.toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
 function haversineDistanceKm(
   first: { latitude: number; longitude: number },
   second: { latitude: number; longitude: number }
@@ -62,21 +71,21 @@ function getPreferredDateTime(job: TechnicianJob): string {
   const date = job.preferred_service_date;
   const time = job.preferred_service_time;
   if (typeof date === "string" && typeof time === "string" && time.trim()) {
-    return `${date} · ${time}`;
+    return `${formatScheduleDate(date)} · ${time}`;
   }
   if (typeof job.scheduled_at === "string") {
     const timestamp = Date.parse(job.scheduled_at);
     if (Number.isFinite(timestamp)) {
       const scheduled = new Date(timestamp);
       if (typeof date === "string" && date.trim()) {
-        return `${date} · ${typeof time === "string" && time.trim() ? time : scheduled.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", hour12: true})}`;
+        return `${formatScheduleDate(date)} · ${typeof time === "string" && time.trim() ? time : scheduled.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", hour12: true})}`;
       }
       return scheduled.toLocaleString([], {
         month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit"
       });
     }
   }
-  if (typeof date === "string" && date.trim()) return date;
+  if (typeof date === "string" && date.trim()) return formatScheduleDate(date);
   if (typeof time === "string" && time.trim()) return time;
   return "Not provided";
 }

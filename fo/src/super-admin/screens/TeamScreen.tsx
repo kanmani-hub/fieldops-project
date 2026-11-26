@@ -41,6 +41,7 @@ import {
   getTechnicianById,
   getTechniciansPage,
   provisionOrganizationUser,
+  setDispatcherActive,
   updateTechnicianAvailability,
   type OrganizationUserRole,
 } from '../api/operations';
@@ -214,7 +215,9 @@ export default function TeamScreen({ onNavigate }: { onNavigate: (tab: string) =
   const [statusFilter, setStatusFilter] = useState('All');
   const [filterModalVisible, setFilterModalVisible] = useState(false);
   const [showDeactivatedTechnicians, setShowDeactivatedTechnicians] = useState(false);
+  const [showDeactivatedDispatchers, setShowDeactivatedDispatchers] = useState(false);
   const [updatingTechnicianId, setUpdatingTechnicianId] = useState<string | null>(null);
+  const [updatingDispatcherId, setUpdatingDispatcherId] = useState<string | null>(null);
   const [technicianPage, setTechnicianPage] = useState(1);
   const [technicianTotal, setTechnicianTotal] = useState(0);
   const [hasMoreTechnicians, setHasMoreTechnicians] = useState(false);
@@ -346,7 +349,9 @@ export default function TeamScreen({ onNavigate }: { onNavigate: (tab: string) =
   const rows = useMemo(() => {
     if (view === 'technicians') return technicians;
 
-    const source = dispatchers;
+    const source = dispatchers.filter((row: any) =>
+      showDeactivatedDispatchers ? !row.is_active : row.is_active,
+    );
     const term = search.trim().toLowerCase();
     return source.filter((row: any) => !term || [
         row.technician_name,
@@ -356,7 +361,7 @@ export default function TeamScreen({ onNavigate }: { onNavigate: (tab: string) =
         row.technician_location,
         row.phone_number,
       ].some(value => String(value || '').toLowerCase().includes(term)));
-  }, [view, technicians, dispatchers, search]);
+  }, [view, technicians, dispatchers, search, showDeactivatedDispatchers]);
 
   const selectedId = selectedTechnician?.technician_id;
   const profile = technicianDetails || selectedTechnician || {};
@@ -587,11 +592,57 @@ export default function TeamScreen({ onNavigate }: { onNavigate: (tab: string) =
     );
   };
 
+  const updateDispatcherActiveStatus = async (dispatcher: any, isActive: boolean) => {
+    const dispatcherId = String(dispatcher.id || '');
+    const dispatcherName = text(dispatcher.name, 'Dispatcher');
+    if (!dispatcherId) return;
+
+    setUpdatingDispatcherId(dispatcherId);
+    try {
+      await setDispatcherActive(dispatcherId, isActive);
+      await load(true);
+      Alert.alert(
+        isActive ? 'Dispatcher reactivated' : 'Dispatcher deactivated',
+        isActive
+          ? `${dispatcherName} can sign in again.`
+          : `${dispatcherName} can no longer sign in. Their record and history have been kept.`,
+      );
+    } catch (e: any) {
+      const message = e?.response?.data?.detail || e?.message || 'Could not update dispatcher status.';
+      Alert.alert('Dispatcher status update failed', String(message));
+    } finally {
+      setUpdatingDispatcherId(null);
+    }
+  };
+
+  const confirmDeactivateDispatcher = (dispatcher: any) => {
+    const dispatcherName = text(dispatcher.name, 'this dispatcher');
+    Alert.alert(
+      'Deactivate dispatcher?',
+      `Deactivate “${dispatcherName}”? They will lose access to this organization. Their record and history will be kept and can be reactivated later.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Deactivate',
+          style: 'destructive',
+          onPress: () => void updateDispatcherActiveStatus(dispatcher, false),
+        },
+      ],
+      { cancelable: true },
+    );
+  };
+
   const toggleDeactivatedTechnicians = () => {
     setShowDeactivatedTechnicians(current => !current);
     setSearch('');
     setDebouncedSearch('');
     setStatusFilter('All');
+  };
+
+  const toggleDeactivatedDispatchers = () => {
+    setShowDeactivatedDispatchers(current => !current);
+    setSearch('');
+    setDebouncedSearch('');
   };
 
   const availableCount = technicians.filter((item: any) =>
@@ -629,7 +680,9 @@ export default function TeamScreen({ onNavigate }: { onNavigate: (tab: string) =
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingHorizontal: 3, paddingVertical: 5 }}>
           <View style={{ flex: 1, gap: 4 }}>
             <Text style={{ color: '#103F2B', fontSize: 27, fontWeight: '900', letterSpacing: -0.8 }}>
-              {view === 'technicians' && showDeactivatedTechnicians ? 'Deactivated' : view === 'technicians' ? 'Technicians' : 'Dispatchers'}
+              {view === 'technicians'
+                ? showDeactivatedTechnicians ? 'Deactivated' : 'Technicians'
+                : showDeactivatedDispatchers ? 'Deactivated Dispatchers' : 'Dispatchers'}
             </Text>
             <Text style={{ color: '#244F3A', fontSize: 12, fontWeight: '600' }}>
               {view === 'technicians' ? 'Manage your field technicians' : 'Manage your dispatch team'}
@@ -643,7 +696,17 @@ export default function TeamScreen({ onNavigate }: { onNavigate: (tab: string) =
               <Text style={{ color: '#174D32', fontSize: 11, fontWeight: '900' }}>{showDeactivatedTechnicians ? 'Active team' : 'Deactivated'}</Text>
             </Pressable>
           ) : null}
-          {!(view === 'technicians' && showDeactivatedTechnicians) ? (
+          {view === 'dispatchers' ? (
+            <Pressable
+              onPress={toggleDeactivatedDispatchers}
+              style={{ minHeight: 42, paddingHorizontal: 13, borderRadius: 24, borderWidth: 1.4, borderColor: '#4F8C59', backgroundColor: 'rgba(247,252,239,0.94)', alignItems: 'center', justifyContent: 'center' }}
+            >
+              <Text style={{ color: '#174D32', fontSize: 11, fontWeight: '900' }}>
+                {showDeactivatedDispatchers ? 'Active Dispatchers' : 'Deactivated Dispatchers'}
+              </Text>
+            </Pressable>
+          ) : null}
+          {!(view === 'technicians' && showDeactivatedTechnicians) && !(view === 'dispatchers' && showDeactivatedDispatchers) ? (
             <Pressable
               onPress={startCreate}
               style={{ minHeight: 44, paddingHorizontal: 15, borderRadius: 24, backgroundColor: '#075B36', borderWidth: 1, borderColor: '#2F8B4D', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, elevation: 2 }}
@@ -694,7 +757,7 @@ export default function TeamScreen({ onNavigate }: { onNavigate: (tab: string) =
               return (
                 <Pressable
                   key={tab}
-                  onPress={() => { setView(tab); setSearch(''); setStatusFilter('All'); }}
+                  onPress={() => { setView(tab); setSearch(''); setStatusFilter('All'); setShowDeactivatedDispatchers(false); }}
                   style={{ flex: 1, minHeight: 48, borderRadius: 25, backgroundColor: active ? '#075B36' : 'transparent', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 7, elevation: active ? 2 : 0 }}
                 >
                   {tab === 'technicians' ? <HardHat size={20} color={active ? '#FFFFFF' : '#12482F'} /> : <Headset size={20} color={active ? '#FFFFFF' : '#12482F'} />}
@@ -756,7 +819,9 @@ export default function TeamScreen({ onNavigate }: { onNavigate: (tab: string) =
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
             <Leaf size={22} color="#3C8A38" fill="#7CBF48" />
             <Text style={{ color: '#103F2B', fontSize: 19, fontWeight: '900' }}>
-              {view === 'technicians' ? (showDeactivatedTechnicians ? 'Deactivated Technicians' : 'Technicians') : 'Dispatcher Directory'}
+              {view === 'technicians'
+                ? (showDeactivatedTechnicians ? 'Deactivated Technicians' : 'Technicians')
+                : showDeactivatedDispatchers ? 'Deactivated Dispatcher Directory' : 'Dispatcher Directory'}
             </Text>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
@@ -771,8 +836,10 @@ export default function TeamScreen({ onNavigate }: { onNavigate: (tab: string) =
         ) : rows.length === 0 ? (
           <EmptyState
             title={`No ${view} found`}
-            detail={showDeactivatedTechnicians
-              ? 'No deactivated technicians found.'
+            detail={view === 'dispatchers' && showDeactivatedDispatchers
+              ? 'No deactivated dispatchers found.'
+              : showDeactivatedTechnicians
+                ? 'No deactivated technicians found.'
               : search || statusFilter !== 'All'
                 ? 'Try another search or availability filter.'
                 : 'Staff records will appear here when available.'}
@@ -858,6 +925,19 @@ export default function TeamScreen({ onNavigate }: { onNavigate: (tab: string) =
                 <Text style={{ color: '#718277', fontSize: 10 }}>{item.is_on_duty ? 'On duty' : 'Off duty'}</Text>
               </View>
               <Text style={{ color: '#829087', fontSize: 10 }}>Last login: {dateTime(item.last_login)}</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`${item.is_active ? 'Deactivate' : 'Reactivate'} ${item.name || 'dispatcher'}`}
+                disabled={updatingDispatcherId === String(item.id)}
+                onPress={() => item.is_active
+                  ? confirmDeactivateDispatcher(item)
+                  : void updateDispatcherActiveStatus(item, true)}
+                style={{ minHeight: 38, paddingHorizontal: 13, borderRadius: 12, borderWidth: 1, borderColor: item.is_active ? '#F0B8B3' : '#9BCBA5', backgroundColor: item.is_active ? '#FFF0EE' : '#E4F3E7', alignItems: 'center', justifyContent: 'center', opacity: updatingDispatcherId === String(item.id) ? 0.55 : 1 }}
+              >
+                <Text style={{ color: item.is_active ? '#B33B36' : '#17643B', fontSize: 11, fontWeight: '900' }}>
+                  {updatingDispatcherId === String(item.id) ? 'Please wait...' : item.is_active ? 'Deactivate dispatcher' : 'Reactivate dispatcher'}
+                </Text>
+              </Pressable>
             </Card>
           ))
         )}

@@ -24,6 +24,7 @@ import {
 } from "../../../src/customer/components/ui";
 import type { CustomerFeedback, CustomerJob } from "../../../src/customer/types/api";
 import { colors } from "../../../src/customer/theme";
+import { displayCustomerStatus } from "../../../src/customer/utils/format";
 import { env } from "../../../src/customer/config/env";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 import { useFocusedAutoRefresh } from "../../../src/customer/hooks/useFocusedAutoRefresh";
@@ -954,7 +955,7 @@ setJob(result);
             {lastUpdate ? `Last update: ${formatDateTime(lastUpdate)}` : "Waiting for the first live tracking update"}
           </Text>
           <View style={styles.statusChip}>
-            <Text style={styles.statusChipText}>{String(job.status || "UNKNOWN").replaceAll("_", " ")}</Text>
+            <Text style={styles.statusChipText}>{displayCustomerStatus(job.status)}</Text>
           </View>
         </View>
 

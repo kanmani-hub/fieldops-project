@@ -21,6 +21,41 @@ export function normalizedStatus(value?: string | null): string {
   return String(value ?? "UNKNOWN").trim().toUpperCase().replaceAll("-", "_").replaceAll(" ", "_");
 }
 
+/** Match the web customer tracker labels for service and linked job states. */
+export function displayCustomerStatus(value?: string | null): string {
+  switch (normalizedStatus(value)) {
+    case "CREATED":
+    case "PENDING":
+    case "UNASSIGNED":
+    case "QUEUED":
+      return "UNASSIGNED";
+    case "ASSIGNED":
+    case "AWAITING_ACCEPTANCE":
+    case "FORCE_ASSIGNED":
+      return "AWAITING ACCEPTANCE";
+    case "ACCEPTED":
+      return "ASSIGNED";
+    case "EN_ROUTE":
+    case "ENROUTE":
+      return "EN ROUTE";
+    case "ON_SITE":
+    case "ONSITE":
+    case "IN_PROGRESS":
+      return "IN PROGRESS";
+    case "COMPLETED":
+    case "CLOSED":
+      return "COMPLETED";
+    case "CANCELED":
+    case "CANCELLED":
+      return "CANCELLED";
+    case "REJECTED":
+    case "REJECTED_BY_TECHNICIAN":
+      return "CANCELLED";
+    default:
+      return normalizedStatus(value).replaceAll("_", " ");
+  }
+}
+
 export function canCancelRequest(requestStatus?: string | null, linkedJobStatus?: string | null, hasLinkedJob = false): boolean {
   if (hasLinkedJob) {
     // The backend only permits cancellation of a linked job while it is CREATED, ASSIGNED or ACCEPTED.

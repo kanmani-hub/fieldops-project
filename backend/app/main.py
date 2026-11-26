@@ -57,7 +57,7 @@ from .routes import customer_chat
 from .routes import job_messaging
 from . import models
 from .services.justification_validator import JustificationValidationError
-from .worker import start_scheduler, stop_scheduler
+from .worker import start_scheduler, stop_scheduler, register_pending_overnight_dispatches
 from .services.tracking_manager import connection_manager
 from .services.broadcast_scheduler import BroadcastScheduler
 from .routes.tracking import redis_gps_listener
@@ -197,6 +197,11 @@ async def lifespan(app: FastAPI):
         logger.warning(
             f"Could not auto-create tables or columns: {e}"
         )
+
+    try:
+        register_pending_overnight_dispatches()
+    except Exception:
+        logger.exception("Could not restore overnight dispatch schedules")
 
     redis_url = os.getenv("REDIS_ASYNC_URL") or os.getenv("REDIS_URL")
     redis_host = os.getenv("REDIS_HOST", "localhost")

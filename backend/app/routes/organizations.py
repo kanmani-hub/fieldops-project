@@ -26,8 +26,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func, or_, cast, String, case
 
 
 from ..database import get_db
@@ -39,6 +39,9 @@ from ..auth.rbac import UserRole, Permission
 from ..auth.password import hash_password, validate_password_strength, PasswordValidationError
 from ..models.organization import Organization
 from ..models.user import User
+from ..models_legacy import Job, Technician
+from ..models.job_closure import JobClosure
+from ..models.payment_status import JobPaymentStatus
 from ..services.enterprise_audit import audit_log, AuditAction
 from ..models.organization_onboarding import OrganizationOnboarding
 import os
@@ -157,6 +160,7 @@ class CompleteOrganizationOnboardingRequest(BaseModel):
     onboarding_id: str
     password: str = Field(..., min_length=8, max_length=128)
     confirm_password: str = Field(..., min_length=8, max_length=128)
+    phone_number: str = Field(..., min_length=10, max_length=10, pattern=r"^\d{10}$")
 
 
 class VerifyOTPRequest(BaseModel):
@@ -495,6 +499,7 @@ async def complete_organization_onboarding(
         max_technicians=50,
         max_jobs_per_month=500,
         contact_email=onboarding.admin_email,
+        contact_phone=payload.phone_number,
         address=onboarding.address,
         site_latitude=onboarding.site_latitude,
         site_longitude=onboarding.site_longitude,
@@ -513,6 +518,7 @@ async def complete_organization_onboarding(
         password_hash=hash_password(payload.password),
         first_name=onboarding.admin_first_name,
         last_name=onboarding.admin_last_name,
+        phone_number=payload.phone_number,
         role=UserRole.SUPER_ADMIN.value,
         tenant_id=organization.id,
         is_active=True,
@@ -612,41 +618,573 @@ async def create_organization(
     }
 
 
+def get_platform_real_super_admins(db: Session):
+    """
+    Finds real Super Admin accounts across partner organizations.
+    Filters out system tenants (__platform__), automated test runners (@example.com, @test.com),
+    and temporary test fixtures (test-tenant-*, sso, oidc).
+    Returns a dict mapping tenant_id -> primary Super Admin User.
+    """
+    super_admins = (
+        db.query(User)
+        .filter(
+            func.lower(User.role).in_(["super_admin", "superadmin"]),
+            User.deleted_at.is_(None),
+            User.tenant_id.isnot(None),
+            User.tenant_id != "__platform__",
+            ~User.email.ilike("%@example.com"),
+            ~User.email.ilike("%@test.com"),
+            ~User.tenant_id.ilike("test-%"),
+            ~User.tenant_id.ilike("%sso%"),
+            ~User.tenant_id.ilike("%oidc%"),
+        )
+        .order_by(User.created_at.asc())
+        .all()
+    )
+    tenant_admin_map = {}
+    for admin in super_admins:
+        if admin.tenant_id not in tenant_admin_map:
+            tenant_admin_map[admin.tenant_id] = admin
+    return tenant_admin_map
+
+
+@org_router.get("/platform-stats")
+def get_platform_head_stats(
+    tenant_id: Optional[str] = Query(None),
+    period: str = Query("all", pattern="^(30d|90d|all)$"),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Platform-wide aggregate statistics across all partner organizations.
+    Used by Platform Head dashboard cards.
+    Guarantees Total Jobs = Active Jobs + Completed Jobs + Cancelled Jobs.
+    Guarantees Total Organizations strictly matches the real Super Admin organizations count.
+    """
+    user_role = str(getattr(current_user.role, "value", current_user.role) or "").lower()
+    if user_role not in {"head", "super_admin", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Platform stats are restricted to Platform Head operators.",
+        )
+
+    # 1. Total real partner organizations count (organizations with real Super Admins)
+    tenant_admin_map = get_platform_real_super_admins(db)
+    total_organizations = len(tenant_admin_map)
+
+    job_query = db.query(Job)
+    if tenant_id and tenant_id.strip().lower() != "all":
+        job_query = job_query.filter(Job.tenant_id == tenant_id.strip())
+    if period != "all":
+        start_at = datetime.now(timezone.utc) - timedelta(days=30 if period == "30d" else 90)
+        job_query = job_query.filter(Job.created_at >= start_at)
+
+    # Dashboard job totals follow the selected organization and date range.
+    total_jobs = job_query.with_entities(func.count(Job.id)).scalar() or 0
+
+    # 3. Completed jobs
+    completed_jobs = (
+        job_query.with_entities(func.count(Job.id))
+        .filter(Job.status.in_(["COMPLETED", "CLOSED"]))
+        .scalar()
+        or 0
+    )
+
+    # 4. Total cancelled jobs
+    cancelled_jobs = (
+        job_query.with_entities(func.count(Job.id))
+        .filter(Job.status.in_(["CANCELLED", "CANCELED"]))
+        .scalar()
+        or 0
+    )
+
+    # 5. Active jobs - calculated so that Active + Completed + Cancelled == Total Jobs EQUALIZES strictly
+    active_jobs = max(0, total_jobs - completed_jobs - cancelled_jobs)
+
+    # Financial metrics use persisted closure and payment-status records only.
+    closure_query = db.query(JobClosure).join(
+        Job, (Job.id == JobClosure.job_id) & (Job.tenant_id == JobClosure.tenant_id)
+    )
+    if tenant_id and tenant_id.strip().lower() != "all":
+        closure_query = closure_query.filter(Job.tenant_id == tenant_id.strip())
+    if period != "all":
+        closure_query = closure_query.filter(JobClosure.completed_at >= start_at)
+    closures = closure_query.all()
+    revenue_amount = sum(float(c.subtotal or 0) for c in closures if 0 <= float(c.subtotal or 0) < 500000)
+    payment_rows = db.query(JobPaymentStatus).filter(
+        JobPaymentStatus.job_id.in_([c.job_id for c in closures])
+    ).all() if closures else []
+    payment_by_job = {row.job_id: row.status.upper() for row in payment_rows}
+    def payment_state(closure):
+        state = payment_by_job.get(closure.job_id, "UNAVAILABLE")
+        details = (closure.work_report or {}).get("payment", {}) if isinstance(closure.work_report, dict) else {}
+        if state == "UNAVAILABLE" and isinstance(details, dict) and details.get("method") and details.get("total_amount") is not None:
+            return "SUCCESSFUL"
+        return state
+    collected_amount = sum(
+        float(c.subtotal or 0) for c in closures
+        if payment_state(c) == "SUCCESSFUL" and 0 <= float(c.subtotal or 0) < 500000
+    )
+    pending_amount = sum(
+        float(c.subtotal or 0) for c in closures
+        if payment_state(c) == "PENDING" and 0 <= float(c.subtotal or 0) < 500000
+    )
+    payment_status_records = sum(payment_state(c) != "UNAVAILABLE" for c in closures)
+
+    if revenue_amount >= 10000000:
+        formatted_payment = f"₹{(revenue_amount / 10000000.0):.2f} Cr"
+    elif revenue_amount >= 100000:
+        formatted_payment = f"₹{(revenue_amount / 100000.0):.1f}L"
+    else:
+        formatted_payment = f"₹{revenue_amount:,.0f}"
+
+    return {
+        "total_organizations": total_organizations,
+        "total_jobs": total_jobs,
+        "active_jobs": active_jobs,
+        "completed_jobs": completed_jobs,
+        "cancelled_jobs": cancelled_jobs,
+        "total_payment": formatted_payment,
+        "raw_payment_amount": revenue_amount,
+        "collected_payment_amount": collected_amount,
+        "pending_payment_amount": pending_amount,
+        "payment_records": len(closures),
+        "payment_status_records": payment_status_records,
+        "period": period,
+    }
+
+
+@org_router.get("/platform-performance")
+def get_platform_head_performance(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return lifetime payment and job outcome metrics for each real organization."""
+    user_role = str(getattr(current_user.role, "value", current_user.role) or "").lower()
+    if user_role not in {"head", "super_admin", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Platform performance is restricted to Platform Head operators.",
+        )
+
+    tenant_ids = list(get_platform_real_super_admins(db).keys())
+    if not tenant_ids:
+        return {"data": [], "totals": {"payment_amount": 0, "accepted_jobs": 0, "rejected_jobs": 0}}
+
+    organizations = (
+        db.query(Organization.id, Organization.name)
+        .filter(Organization.id.in_(tenant_ids), Organization.deleted_at.is_(None))
+        .all()
+    )
+    job_rows = (
+        db.query(
+            Job.tenant_id,
+            func.count(Job.id),
+            func.sum(case((func.upper(Job.status).in_(("ACCEPTED", "EN_ROUTE", "TRAVELING", "ON_SITE", "IN_PROGRESS", "COMPLETED", "CLOSED")), 1), else_=0)),
+            func.sum(case((or_(Job.status.is_(None), ~func.upper(Job.status).in_(("ACCEPTED", "EN_ROUTE", "TRAVELING", "ON_SITE", "IN_PROGRESS", "COMPLETED", "CLOSED"))), case((or_(Job.rejected_at.isnot(None), func.upper(Job.status).in_(("REJECTED", "REJECTED_BY_TECHNICIAN", "DECLINED"))), 1), else_=0)), else_=0)),
+        )
+        .filter(Job.tenant_id.in_(tenant_ids))
+        .group_by(Job.tenant_id)
+        .all()
+    )
+    closure_rows = (
+        db.query(JobClosure.tenant_id, func.sum(JobClosure.subtotal))
+        .filter(JobClosure.tenant_id.in_(tenant_ids), JobClosure.subtotal < 500000.0)
+        .group_by(JobClosure.tenant_id)
+        .all()
+    )
+    job_metrics = {row[0]: row for row in job_rows}
+    payments = {row[0]: float(row[1] or 0) for row in closure_rows}
+
+    data = []
+    for org_id, org_name in organizations:
+        metrics = job_metrics.get(org_id)
+        data.append({
+            "organization_id": org_id,
+            "organization_name": org_name,
+            "total_jobs": int(metrics[1] or 0) if metrics else 0,
+            "accepted_jobs": int(metrics[2] or 0) if metrics else 0,
+            "rejected_jobs": int(metrics[3] or 0) if metrics else 0,
+            "payment_amount": round(payments.get(org_id, 0), 2),
+        })
+
+    data.sort(key=lambda item: item["payment_amount"], reverse=True)
+    return {
+        "data": data,
+        "totals": {
+            "payment_amount": round(sum(item["payment_amount"] for item in data), 2),
+            "accepted_jobs": sum(item["accepted_jobs"] for item in data),
+            "rejected_jobs": sum(item["rejected_jobs"] for item in data),
+        },
+    }
+
+
+@org_router.get("/platform-jobs")
+def get_platform_head_jobs(
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    payment_status: Optional[str] = Query(None),
+    tenant_id: Optional[str] = Query(None),
+    period: str = Query("all", pattern="^(30d|90d|all)$"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(15, ge=1, le=250),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns platform-wide jobs across all partner organizations for Platform Head.
+    Guarantees that total counts match the Dashboard card metrics strictly.
+    """
+    user_role = str(getattr(current_user.role, "value", current_user.role) or "").lower()
+    if user_role not in {"head", "super_admin", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Platform jobs are restricted to Platform Head operators.",
+        )
+
+    # Pre-fetch organization names and technician names
+    org_rows = (
+        db.query(Organization.id, Organization.name)
+        .filter(Organization.deleted_at.is_(None))
+        .all()
+    )
+    org_map = {row[0]: row[1] for row in org_rows}
+
+    tech_rows = db.query(Technician.technician_id, Technician.technician_name).all()
+    tech_map = {row[0]: row[1] for row in tech_rows}
+
+    # Base counts across all platform jobs (always equalized to dashboard metrics)
+    counts_query = db.query(Job)
+    if tenant_id and tenant_id.strip() and tenant_id.lower() != "all":
+        counts_query = counts_query.filter(Job.tenant_id == tenant_id.strip())
+    if period != "all":
+        jobs_start_at = datetime.now(timezone.utc) - timedelta(days=30 if period == "30d" else 90)
+        counts_query = counts_query.filter(Job.created_at >= jobs_start_at)
+    all_total_count = counts_query.with_entities(func.count(Job.id)).scalar() or 0
+    all_completed_count = (
+        counts_query.with_entities(func.count(Job.id))
+        .filter(Job.status.in_(["COMPLETED", "CLOSED"]))
+        .scalar()
+        or 0
+    )
+    all_cancelled_count = (
+        counts_query.with_entities(func.count(Job.id))
+        .filter(Job.status.in_(["CANCELLED", "CANCELED"]))
+        .scalar()
+        or 0
+    )
+    all_active_count = max(0, all_total_count - all_completed_count - all_cancelled_count)
+
+    # Query jobs
+    query = db.query(Job).options(joinedload(Job.technician))
+    if period != "all":
+        query = query.filter(Job.created_at >= jobs_start_at)
+
+    # Optional Filters
+    if tenant_id and tenant_id.strip() and tenant_id.lower() != "all":
+        query = query.filter(Job.tenant_id == tenant_id.strip())
+
+    if payment_status and payment_status.strip().upper() != "ALL":
+        payment_state = payment_status.strip().upper()
+        if payment_state not in {"PENDING", "SUCCESSFUL", "FAILED", "UNAVAILABLE"}:
+            raise HTTPException(status_code=400, detail="Unsupported payment status filter.")
+        if payment_state in {"SUCCESSFUL", "UNAVAILABLE"}:
+            status_query = db.query(JobPaymentStatus.job_id, JobPaymentStatus.status)
+            if tenant_id and tenant_id.strip().lower() != "all":
+                status_query = status_query.filter(JobPaymentStatus.tenant_id == tenant_id.strip())
+            status_rows = status_query.all()
+            states_by_job = {row.job_id: row.status.upper() for row in status_rows}
+            legacy_success_ids = []
+            if payment_state in {"SUCCESSFUL", "UNAVAILABLE"}:
+                legacy_query = db.query(JobClosure).join(
+                    Job, (Job.id == JobClosure.job_id) & (Job.tenant_id == JobClosure.tenant_id)
+                ).filter(JobClosure.work_report.isnot(None))
+                if tenant_id and tenant_id.strip().lower() != "all":
+                    legacy_query = legacy_query.filter(Job.tenant_id == tenant_id.strip())
+                legacy_closures = legacy_query.all()
+                for closure in legacy_closures:
+                    report = closure.work_report if isinstance(closure.work_report, dict) else {}
+                    details = report.get("payment") if isinstance(report.get("payment"), dict) else {}
+                    if details.get("method") and details.get("total_amount") is not None:
+                        legacy_success_ids.append(closure.job_id)
+            successful_ids = [job_id for job_id, state in states_by_job.items() if state == "SUCCESSFUL"]
+            if payment_state == "SUCCESSFUL":
+                query = query.filter(Job.id.in_(set(successful_ids + legacy_success_ids)))
+            else:
+                known_ids = {job_id for job_id, state in states_by_job.items() if state != "UNAVAILABLE"} | set(legacy_success_ids)
+                query = query.filter(~Job.id.in_(known_ids)) if known_ids else query
+        else:
+            payment_job_ids = db.query(JobPaymentStatus.job_id).filter(
+                JobPaymentStatus.status == payment_state
+            )
+            query = query.filter(Job.id.in_(payment_job_ids))
+
+    if status and status.strip() and status.lower() != "all":
+        s_upper = status.strip().upper().replace(" ", "_")
+        if s_upper == "ACTIVE":
+            query = query.filter(~Job.status.in_(["COMPLETED", "CLOSED", "CANCELLED", "CANCELED"]))
+        elif s_upper in {"COMPLETED", "CLOSED"}:
+            query = query.filter(Job.status.in_(["COMPLETED", "CLOSED"]))
+        elif s_upper in {"CANCELLED", "CANCELED"}:
+            query = query.filter(Job.status.in_(["CANCELLED", "CANCELED"]))
+        else:
+            query = query.filter(func.upper(Job.status) == s_upper)
+
+    if search and search.strip():
+        search_term = f"%{search.strip()}%"
+        matching_org_ids = db.query(Organization.id).filter(Organization.name.ilike(search_term))
+        query = query.filter(
+            or_(
+                cast(Job.id, String).ilike(search_term),
+                Job.customer_name.ilike(search_term),
+                Job.contact_number.ilike(search_term),
+                Job.service_type.ilike(search_term),
+                Job.issue_description.ilike(search_term),
+                Job.tenant_id.ilike(search_term),
+                Job.tenant_id.in_(matching_org_ids),
+                Job.location.ilike(search_term),
+                cast(Job.assigned_technician_id, String).ilike(search_term),
+                Job.technician.has(Technician.technician_name.ilike(search_term)),
+            )
+        )
+
+    filtered_total = query.count()
+    jobs = query.order_by(Job.id.desc()).offset((page - 1) * limit).limit(limit).all()
+
+    # Pre-fetch closure and authoritative payment status for the displayed jobs.
+    job_ids = [j.id for j in jobs]
+    closure_map = {}
+    closure_records = {}
+    if job_ids:
+        closures = (
+            db.query(JobClosure)
+            .filter(JobClosure.job_id.in_(job_ids), JobClosure.subtotal >= 0, JobClosure.subtotal < 500000.0)
+            .order_by(JobClosure.completed_at.desc(), JobClosure.id.desc())
+            .all()
+        )
+        for closure in closures:
+            closure_map.setdefault(closure.job_id, float(closure.subtotal or 0))
+            closure_records.setdefault(closure.job_id, closure)
+    payment_rows = db.query(JobPaymentStatus).filter(
+        JobPaymentStatus.job_id.in_(job_ids)
+    ).all() if job_ids else []
+    payment_status_by_job = {row.job_id: row.status.upper() for row in payment_rows}
+    for j_id, closure in closure_records.items():
+        state = payment_status_by_job.get(j_id, "UNAVAILABLE")
+        work_report = closure.work_report if isinstance(closure.work_report, dict) else {}
+        payment_details = work_report.get("payment") if isinstance(work_report.get("payment"), dict) else {}
+        if state == "UNAVAILABLE" and payment_details.get("method") and payment_details.get("total_amount") is not None:
+            payment_status_by_job[j_id] = "SUCCESSFUL"
+
+    items = []
+    for j in jobs:
+        org_name = org_map.get(
+            j.tenant_id,
+            (j.tenant_id or "Partner Org").replace("org-", "Org ").replace("tenant-", "Tenant ").title(),
+        )
+        tech_obj = getattr(j, "technician", None)
+        tech_name = getattr(tech_obj, "technician_name", None) if tech_obj else None
+        if not tech_name and j.assigned_technician_id:
+            tech_name = tech_map.get(j.assigned_technician_id)
+        if not tech_name:
+            tech_name = "Unassigned"
+
+        cust_name = (j.customer_name or "").strip() or "—"
+
+        raw_status = (j.status or "CREATED").upper().replace(" ", "_")
+        if raw_status in {"REJECTED_BY_TECHNICIAN", "REJECTED", "DECLINED"}:
+            raw_status = "QUEUED"
+
+        # Determine payment amount for completed jobs
+        payment_amount = None
+        formatted_payment = "—"
+        if j.id in closure_map:
+            amt = closure_map[j.id]
+            payment_amount = round(amt, 2)
+            formatted_payment = f"₹{amt:,.0f}" if amt == int(amt) else f"₹{amt:,.2f}"
+
+        items.append({
+            "id": j.id,
+            "job_number": str(j.id),
+            "tenant_id": j.tenant_id or "—",
+            "organization_name": org_name,
+            "customer_name": cust_name,
+            "contact_number": getattr(j, "contact_number", "—") or "—",
+            "service_type": j.service_type or "General Service",
+            "issue_description": j.issue_description or "—",
+            "priority": (j.priority or "NORMAL").upper(),
+            "status": raw_status,
+            "technician_name": tech_name,
+            "payment_amount": payment_amount,
+            "formatted_payment": formatted_payment,
+            "payment_status": payment_status_by_job.get(j.id, "UNAVAILABLE"),
+            "location": getattr(j, "site_address", None) or j.location or "—",
+            "preferred_service_date": str(j.preferred_service_date) if j.preferred_service_date else None,
+            "created_at": j.created_at.isoformat() if getattr(j, "created_at", None) else None,
+        })
+
+    return {
+        "data": items,
+        "total": filtered_total,
+        "platform_total": all_total_count,
+        "platform_active": all_active_count,
+        "platform_completed": all_completed_count,
+        "platform_cancelled": all_cancelled_count,
+        "page": page,
+        "limit": limit,
+    }
+
+
 @org_router.get("")
 async def list_organizations(
     status_filter: Optional[str] = Query(None, alias="status"),
     page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(100, ge=1, le=250),
     all_tenants: bool = Query(False, description="Platform admin only: view all tenants"),
-current_user: AuthenticatedUser = Depends(
-    require_permission(Permission.ORG_VIEW_ALL)
-),
-     db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """List organizations. Filtered by current user's tenant by default."""
-    query = db.query(Organization).filter(Organization.deleted_at.is_(None))
+    """List organizations. For Platform Head, lists only real partner organizations with Super Admins."""
+    user_role = str(getattr(current_user.role, "value", current_user.role) or "").lower()
+    if user_role not in {"head", "super_admin", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permission denied: viewing organizations is restricted to platform operators.",
+        )
 
-    # Strict tenant isolation by default for all users
-    if not (all_tenants and current_user.tenant_id == "__platform__"):
-        query = query.filter(Organization.id == current_user.tenant_id)
+    tenant_admin_map = get_platform_real_super_admins(db)
+
+    # Platform Head views all real partner organizations (matched to super admin organizations)
+    if user_role == "head":
+        real_tenant_ids = list(tenant_admin_map.keys())
+        query = db.query(Organization).filter(
+            Organization.id.in_(real_tenant_ids),
+            Organization.deleted_at.is_(None),
+        )
+    elif all_tenants and current_user.tenant_id == "__platform__":
+        query = db.query(Organization).filter(Organization.deleted_at.is_(None))
+    else:
+        query = db.query(Organization).filter(
+            Organization.id == current_user.tenant_id,
+            Organization.deleted_at.is_(None),
+        )
 
     if status_filter:
         query = query.filter(Organization.status == status_filter.upper())
 
-    total = query.count()
-    orgs = query.order_by(Organization.created_at.desc()).offset((page - 1) * limit).limit(limit).all()
+    orgs = query.order_by(Organization.created_at.desc()).all()
+
+    # Ensure any real tenant_id with super admin has an organization record
+    if user_role == "head":
+        existing_org_ids = {org.id for org in orgs}
+        for tid, s_admin in tenant_admin_map.items():
+            if tid not in existing_org_ids:
+                synthesized_name = f"{s_admin.first_name} {s_admin.last_name}'s Org".strip()
+                new_org = Organization(
+                    id=tid,
+                    name=synthesized_name,
+                    slug=tid,
+                    status="ACTIVE",
+                    subscription_plan="ENTERPRISE",
+                    max_users=50,
+                    max_technicians=100,
+                    contact_email=s_admin.email,
+                )
+                orgs.append(new_org)
+                existing_org_ids.add(tid)
+
+    total = len(orgs)
+    paginated_orgs = orgs[(page - 1) * limit : page * limit]
 
     results = []
-    for org in orgs:
+    for org in paginated_orgs:
         user_count = db.query(func.count(User.id)).filter(
             User.tenant_id == org.id,
             User.deleted_at.is_(None),
-        ).scalar()
+        ).scalar() or 0
         dispatcher_count = db.query(func.count(User.id)).filter(
             User.tenant_id == org.id,
             User.role == UserRole.DISPATCHER.value,
             User.deleted_at.is_(None),
-        ).scalar()
+        ).scalar() or 0
+        job_count = db.query(func.count(Job.id)).filter(
+            Job.tenant_id == org.id,
+        ).scalar() or 0
+        completed_job_count = db.query(func.count(Job.id)).filter(
+            Job.tenant_id == org.id,
+            Job.status.in_(["COMPLETED", "CLOSED"]),
+        ).scalar() or 0
+        cancelled_job_count = db.query(func.count(Job.id)).filter(
+            Job.tenant_id == org.id,
+            Job.status.in_(["CANCELLED", "CANCELED"]),
+        ).scalar() or 0
+        active_job_count = max(0, job_count - completed_job_count - cancelled_job_count)
+        tech_table_count = db.query(func.count(Technician.technician_id)).filter(
+            Technician.tenant_id == org.id,
+        ).scalar() or 0
+        tech_user_count = db.query(func.count(User.id)).filter(
+            User.tenant_id == org.id,
+            User.role.ilike("%tech%"),
+            User.deleted_at.is_(None),
+        ).scalar() or 0
+        technician_count = max(tech_table_count, tech_user_count, 1)
+
+        # Revenue calculation from JobClosure for completed jobs
+        tenant_closure_sum = (
+            db.query(func.sum(JobClosure.subtotal))
+            .join(Job, (Job.id == JobClosure.job_id) & (Job.tenant_id == JobClosure.tenant_id))
+            .filter(
+                Job.tenant_id == org.id,
+                JobClosure.subtotal > 0,
+                JobClosure.subtotal < 500000.0,
+            )
+            .scalar()
+        )
+        raw_rev = float(tenant_closure_sum or 0.0)
+
+        if raw_rev >= 100000:
+            formatted_rev = f"₹{(raw_rev / 100000.0):.1f}L"
+        elif raw_rev > 0:
+            formatted_rev = f"₹{raw_rev:,.0f}"
+        else:
+            formatted_rev = "₹0"
+
+        # Attach Super Admin info
+        s_admin = tenant_admin_map.get(org.id)
+        admin_name = f"{s_admin.first_name} {s_admin.last_name}".strip() if s_admin else "—"
+        admin_email = s_admin.email if s_admin else org.contact_email or "—"
+        admin_phone = (s_admin.phone_number if s_admin and s_admin.phone_number else org.contact_phone) or "—"
+
+        # Distinct services offered by this organization
+        raw_services = (
+            db.query(Job.service_type)
+            .filter(Job.tenant_id == org.id, Job.service_type.isnot(None))
+            .distinct()
+            .all()
+        )
+        cleaned_services = []
+        for (srv,) in raw_services:
+            if not srv or not srv.strip():
+                continue
+            norm = srv.strip()
+            if norm.lower() in {"hvac", "hvac repair", "hvac_repair", "ac mechanic", "ac mechnice"}:
+                c_name = "HVAC & Air Conditioning"
+            elif norm.lower() in {"electrical", "electrical_service", "electrical service"}:
+                c_name = "Electrical & Power Systems"
+            elif norm.lower() in {"plumbing", "plimbing"}:
+                c_name = "Plumbing & Piping"
+            elif norm.lower() in {"cctv & security", "cctv", "security"}:
+                c_name = "CCTV & Security Systems"
+            elif norm.lower() in {"network support", "networking", "networking problem"}:
+                c_name = "Networking & WiFi"
+            elif norm.lower() in {"appliance repair", "home appliances", "electronics", "machanic"}:
+                c_name = "Appliance & Electronics Repair"
+            elif norm.lower() in {"painting and waterproofing", "painting", "waterproofing"}:
+                c_name = "Painting & Waterproofing"
+            else:
+                c_name = norm.title()
+            if c_name not in cleaned_services:
+                cleaned_services.append(c_name)
 
         results.append({
             "id": org.id,
@@ -656,9 +1194,22 @@ current_user: AuthenticatedUser = Depends(
             "subscription_plan": org.subscription_plan,
             "max_users": org.max_users,
             "max_technicians": org.max_technicians,
-            "contact_email": org.contact_email,
+            "contact_email": admin_email,
+            "contact_phone": admin_phone,
+            "super_admin_name": admin_name,
+            "super_admin_email": admin_email,
             "user_count": user_count,
             "dispatcher_count": dispatcher_count,
+            "technician_count": technician_count,
+            "technicians_count": technician_count,
+            "job_count": job_count,
+            "completed_job_count": completed_job_count,
+            "active_job_count": active_job_count,
+            "cancelled_job_count": cancelled_job_count,
+            "total_revenue": formatted_rev,
+            "total_payment": formatted_rev,
+            "raw_revenue": raw_rev,
+            "services": cleaned_services,
             "created_at": org.created_at.isoformat() if org.created_at else None,
         })
 
@@ -870,7 +1421,7 @@ async def activate_organization(
     current_user: AuthenticatedUser = Depends(require_permission(Permission.ORG_MANAGE)),
     db: Session = Depends(get_db),
 ):
-    """Reactivate a suspended organization."""
+    """Reactivate a suspended or inactive organization."""
     org = db.query(Organization).filter(
         Organization.id == org_id,
         Organization.deleted_at.is_(None),
@@ -890,6 +1441,11 @@ async def activate_organization(
     org.suspended_by = None
     org.suspension_reason = None
 
+    db.query(User).filter(
+        User.tenant_id == org_id,
+        User.deleted_at.is_(None),
+    ).update({"is_active": True})
+
     audit_log(
         db, action=AuditAction.ORG_ACTIVATED,
         tenant_id=org_id,
@@ -902,7 +1458,7 @@ async def activate_organization(
 
     db.commit()
     logger.info("Organization activated: %s", org_id)
-    return {"message": "Organization activated", "id": org_id}
+    return {"message": "Organization activated", "id": org_id, "status": "ACTIVE"}
 
 
 @org_router.delete("/{org_id}")
@@ -912,7 +1468,10 @@ async def delete_organization(
     current_user: AuthenticatedUser = Depends(require_permission(Permission.ORG_DELETE)),
     db: Session = Depends(get_db),
 ):
-    """Soft delete an organization. Super Admin only."""
+    """
+    Deactivates an organization (marks status as INACTIVE without deleting).
+    Guarantees the organization remains visible with INACTIVE status.
+    """
     org = db.query(Organization).filter(
         Organization.id == org_id,
         Organization.deleted_at.is_(None),
@@ -925,30 +1484,69 @@ async def delete_organization(
         raise HTTPException(status_code=404, detail="Organization not found")
 
     now = datetime.now(timezone.utc)
-    org.status = "DELETED"
-    org.deleted_at = now
-    org.deleted_by = current_user.user_id
+    org.status = "INACTIVE"
+    # Never soft delete - keep in table with status INACTIVE
+    org.suspended_at = now
+    org.suspended_by = current_user.user_id
 
     # Deactivate all users in this org
     db.query(User).filter(
         User.tenant_id == org_id,
         User.deleted_at.is_(None),
-    ).update({"is_active": False, "deleted_at": now, "deleted_by": current_user.user_id})
+    ).update({"is_active": False})
 
     audit_log(
-        db, action=AuditAction.ORG_DELETED,
+        db, action=AuditAction.ORG_SUSPENDED,
         tenant_id=org_id,
         user_id=current_user.user_id,
         role=current_user.role.value,
         entity_type="organization",
         entity_id=org_id,
-        severity="CRITICAL",
+        severity="WARNING",
         request=request,
     )
 
     db.commit()
-    logger.warning("Organization deleted: %s", org_id)
-    return {"message": "Organization deleted", "id": org_id}
+    logger.warning("Organization deactivated to INACTIVE: %s", org_id)
+    return {"message": "Organization marked as INACTIVE", "id": org_id, "status": "INACTIVE"}
+
+
+@org_router.post("/{org_id}/toggle-status")
+async def toggle_organization_status(
+    org_id: str,
+    request: Request,
+    current_user: AuthenticatedUser = Depends(require_permission(Permission.ORG_MANAGE)),
+    db: Session = Depends(get_db),
+):
+    """Toggle organization between ACTIVE and INACTIVE."""
+    org = db.query(Organization).filter(
+        Organization.id == org_id,
+        Organization.deleted_at.is_(None),
+    ).first()
+
+    if current_user.tenant_id != "__platform__" and current_user.tenant_id != org_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    now = datetime.now(timezone.utc)
+    if org.status == "ACTIVE":
+        org.status = "INACTIVE"
+        org.suspended_at = now
+        org.suspended_by = current_user.user_id
+        db.query(User).filter(User.tenant_id == org_id, User.deleted_at.is_(None)).update({"is_active": False})
+        new_status = "INACTIVE"
+    else:
+        org.status = "ACTIVE"
+        org.suspended_at = None
+        org.suspended_by = None
+        org.suspension_reason = None
+        db.query(User).filter(User.tenant_id == org_id, User.deleted_at.is_(None)).update({"is_active": True})
+        new_status = "ACTIVE"
+
+    db.commit()
+    return {"message": f"Organization status changed to {new_status}", "id": org_id, "status": new_status}
 
 
 @org_router.post("/{org_id}/admin", status_code=status.HTTP_201_CREATED)
@@ -1015,6 +1613,7 @@ async def create_org_admin(
             .filter(
                 User.tenant_id == org_id,
                 User.role == UserRole.DISPATCHER.value,
+                User.is_active.is_(True),
                 User.deleted_at.is_(None),
             )
             .first()
@@ -1023,7 +1622,7 @@ async def create_org_admin(
         if existing_dispatcher:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="For one organization, only one dispatcher is allowed.",
+                detail="Only one active dispatcher is allowed per organization.",
             )
     # Check user limit
     current_user_count = db.query(func.count(User.id)).filter(
@@ -1037,15 +1636,20 @@ async def create_org_admin(
             detail=f"Organization has reached its user limit ({org.max_users})",
         )
 
-    # Check duplicate email
+    # Login identifies accounts by email, so email addresses must be unique
+    # across organizations as well as within this organization.
     existing = db.query(User).filter(
-        User.email == payload.email.lower().strip(),
-        User.tenant_id == org_id,
+        func.lower(User.email) == payload.email.lower().strip(),
         User.deleted_at.is_(None),
     ).first()
 
     if existing:
-        raise HTTPException(status_code=409, detail="Email already exists in this organization")
+        detail = (
+            "Email already exists in this organization"
+            if existing.tenant_id == org_id
+            else "Email is already associated with another FieldOps account. Use a different email address."
+        )
+        raise HTTPException(status_code=409, detail=detail)
 
     # Validate password
     try:
@@ -1069,6 +1673,33 @@ async def create_org_admin(
         is_email_verified=True,  # Admin-created accounts are pre-verified
     )
     db.add(admin)
+
+    if role == UserRole.TECHNICIAN:
+        # Technician directory pages read from the technicians table, while
+        # account provisioning creates the login in users. Keep both records
+        # linked so the phone number is immediately available on web and mobile.
+        directory_technician = db.query(Technician).filter(
+            Technician.tenant_id == org_id,
+            Technician.tech_id == admin.id,
+        ).first()
+        if directory_technician is None:
+            directory_technician = Technician(
+                tech_id=admin.id,
+                tenant_id=org_id,
+                technician_name=f"{admin.first_name} {admin.last_name}".strip(),
+                technician_skill="General Technician",
+                technician_location=org.address or "Main Zone",
+                technician_status="OFFLINE",
+                current_jobs=0,
+                max_jobs=5,
+                phone_number=payload.phone_number,
+            )
+            db.add(directory_technician)
+        else:
+            directory_technician.technician_name = (
+                f"{admin.first_name} {admin.last_name}".strip()
+            )
+            directory_technician.phone_number = payload.phone_number
 
     audit_log(
         db, action=AuditAction.USER_CREATED,

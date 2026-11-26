@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import dashboardBanner from "../assets/dashboard-banner.jpeg";
 import { getDashboardStats, getJobs, getTechnicians } from "../services/planningService";
+import { getAdminServices, type ServiceCatalogItem } from "../services/servicesCatalogService";
 import LoadingSpinner from "../components/ui/LoadingSpinner";
 import {
   Briefcase,
@@ -895,7 +896,7 @@ const localCss = `
 }
 .dashboard-category-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 128px), 1fr));
   gap: 10px;
 }
 .dashboard-chart-range button:hover,
@@ -926,16 +927,6 @@ const localCss = `
   }
   .dashboard-technician-card {
     grid-column: auto;
-  }
-}
-@media (max-width: 700px) {
-  .dashboard-category-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-@media (max-width: 420px) {
-  .dashboard-category-grid {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
   @media (max-width: 1024px) {
@@ -1293,6 +1284,7 @@ interface DashboardProps {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [recentJobs, setRecentJobs] = useState<Job[]>([]);
   const [technicians, setTechnicians] = useState<DashboardTechnician[]>([]);
+  const [serviceCatalog, setServiceCatalog] = useState<ServiceCatalogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [statsError, setStatsError] = useState(false);
   const [filterMode, setFilterMode] = useState<DashboardFilterMode>(
@@ -1327,12 +1319,16 @@ interface DashboardProps {
         setLoading(true);
         setStatsError(false);
 
-        const [statsRes, jobsRes, techniciansRes] = await Promise.all([
+        const [statsRes, jobsRes, techniciansRes, servicesRes] = await Promise.all([
           getDashboardStats(timeRange, dateRange),
           getJobs(),
           getTechnicians().catch((error) => {
             console.warn("Dashboard technician list unavailable:", error);
             return { data: [] };
+          }),
+          getAdminServices().catch((error) => {
+            console.warn("Dashboard organization service catalog unavailable:", error);
+            return [];
           }),
         ]);
 
@@ -1348,6 +1344,7 @@ interface DashboardProps {
         if (Array.isArray(techniciansRes?.data)) {
           setTechnicians(techniciansRes.data);
         }
+        setServiceCatalog(Array.isArray(servicesRes) ? servicesRes.filter((service) => service.is_active) : []);
       } catch (err) {
         console.error("Dashboard error loading data:", err);
 
@@ -1368,12 +1365,16 @@ interface DashboardProps {
       if (refreshInFlight || document.visibilityState !== "visible" || !document.hasFocus()) return;
       refreshInFlight = true;
       try {
-        const [statsRes, jobsRes, techniciansRes] = await Promise.all([
+        const [statsRes, jobsRes, techniciansRes, servicesRes] = await Promise.all([
           getDashboardStats(timeRange, dateRange),
           getJobs(),
           getTechnicians().catch((error) => {
             console.warn("Dashboard technician list unavailable:", error);
             return { data: [] };
+          }),
+          getAdminServices().catch((error) => {
+            console.warn("Dashboard organization service catalog unavailable:", error);
+            return [];
           }),
         ]);
 
@@ -1386,6 +1387,9 @@ interface DashboardProps {
         }
         if (isMounted && Array.isArray(techniciansRes?.data)) {
           setTechnicians(techniciansRes.data);
+        }
+        if (isMounted) {
+          setServiceCatalog(Array.isArray(servicesRes) ? servicesRes.filter((service) => service.is_active) : []);
         }
       } catch (err) {
         console.error("Dashboard refresh failed:", err);
@@ -1859,22 +1863,39 @@ interface DashboardProps {
     .slice(0, 4);
 
   const categoryDefinitions = [
-    { name: "HVAC Repair", match: ["hvac", "hvac repair"], icon: Snowflake, color: "#0AA779", tint: "#EAFBF4" },
-    { name: "Electrical", match: ["electrical", "electrician"], icon: Zap, color: "#E99A13", tint: "#FFF8E8" },
-    { name: "Plumbing", match: ["plumbing", "plumber"], icon: Droplet, color: "#EF4444", tint: "#FFF0F1" },
-    { name: "Network Support", match: ["network", "network support", "it support"], icon: Wifi, color: "#0EA5E9", tint: "#EDF8FF" },
-    { name: "General Maintenance", match: ["general maintenance", "maintenance"], icon: Wrench, color: "#64748B", tint: "#F2F5F8" },
-    { name: "Appliance Repair", match: ["appliance", "appliance repair"], icon: Briefcase, color: "#DB4C9B", tint: "#FFF0F8" },
-    { name: "Roofing & Carpentry", match: ["roofing", "carpentry", "roofing carpentry"], icon: Hammer, color: "#607D8B", tint: "#F0F5F7" },
-    { name: "CCTV & Security", match: ["cctv", "security", "cctv security"], icon: ShieldCheck, color: "#059669", tint: "#EAFBF4" },
+    { name: "HVAC Repair", match: ["hvac", "hvac repair", "ac hvac", "air conditioning", "refrigeration"], aliases: ["hvac", "ac", "air conditioning", "refrigeration"], icon: Snowflake, color: "#0AA779", tint: "#EAFBF4" },
+    { name: "Electrical", match: ["electrical", "electrician"], aliases: ["electrical", "electrician"], icon: Zap, color: "#E99A13", tint: "#FFF8E8" },
+    { name: "Plumbing", match: ["plumbing", "plumber"], aliases: ["plumbing", "plumber"], icon: Droplet, color: "#EF4444", tint: "#FFF0F1" },
+    { name: "Network Support", match: ["network", "network support", "it support"], aliases: ["network", "it support"], icon: Wifi, color: "#0EA5E9", tint: "#EDF8FF" },
+    { name: "General Maintenance", match: ["general maintenance", "maintenance"], aliases: ["maintenance"], icon: Wrench, color: "#64748B", tint: "#F2F5F8" },
+    { name: "Appliance Repair", match: ["appliance", "appliance repair", "home appliance", "home appliances"], aliases: ["appliance"], icon: Briefcase, color: "#DB4C9B", tint: "#FFF0F8" },
+    { name: "Roofing & Carpentry", match: ["roofing", "carpentry", "roofing carpentry"], aliases: ["roofing", "carpentry"], icon: Hammer, color: "#607D8B", tint: "#F0F5F7" },
+    { name: "CCTV & Security", match: ["cctv", "security", "cctv security", "security systems"], aliases: ["cctv", "security"], icon: ShieldCheck, color: "#059669", tint: "#EAFBF4" },
   ];
-  const categoryPerformance = categoryDefinitions.map((category) => {
-    const count = selectedJobs.filter((job) => {
-      const raw = (job.service_type || job.required_skill || "").toLowerCase().replace(/[_-]/g, " ").trim();
-      return category.match.some((term) => raw === term || raw.includes(term));
-    }).length;
-    return { ...category, count };
-  });
+  const normalizeService = (value: unknown) => String(value || "").toLowerCase().replace(/[_&-]/g, " ").replace(/\s+/g, " ").trim();
+  const canonicalServiceName = (value: string) => {
+    const normalized = normalizeService(value);
+    if (["home appliances", "home appliance"].some((alias) => normalized === alias || normalized.startsWith(`${alias} `))) return "Home Appliance Repair";
+    if (["air conditioning refrigeration", "air conditioning and refrigeration"].some((alias) => normalized === alias || normalized.startsWith(`${alias} `))) return "Air Conditioning and Refrigeration";
+    if (["cctv security systems", "cctv and security systems"].some((alias) => normalized === alias || normalized.startsWith(`${alias} `))) return "CCTV and Security Systems";
+    return value.trim();
+  };
+  const categoryPerformance = Array.from(new Map(serviceCatalog
+    .filter((service) => service.is_active && service.service_type?.trim())
+    .map((service) => {
+      const name = canonicalServiceName(service.service_type);
+      return [normalizeService(name), name] as const;
+    })).values()).map((name) => {
+      const serviceType = normalizeService(name);
+      const style = categoryDefinitions.find((category) => category.match.some((term) => normalizeService(term) === serviceType || serviceType.includes(normalizeService(term)) || normalizeService(term).includes(serviceType)));
+      const count = selectedJobs.filter((job) => {
+        const jobType = normalizeService(job.service_type ? canonicalServiceName(job.service_type) : "");
+        if (jobType) return jobType === serviceType || jobType.startsWith(`${serviceType} `);
+        const skill = normalizeService(job.required_skill);
+        return Boolean(style?.aliases.some((term) => skill.includes(normalizeService(term))));
+      }).length;
+      return { name, icon: style?.icon || MoreHorizontal, color: style?.color || "#059669", tint: style?.tint || "#EAFBF4", count };
+    });
   const maxCategoryCount = Math.max(1, ...categoryPerformance.map((item) => item.count));
 
   const activeJobsWithSla = selectedJobs.filter((job) => {
@@ -3083,7 +3104,7 @@ interface DashboardProps {
               gap: "12px",
             }}
           >
-            {categoryPerformance.map((category) => {
+            {categoryPerformance.length === 0 ? <p style={{ gridColumn: "1 / -1", margin: "12px", color: "#718096", fontSize: "12px", textAlign: "center" }}>No active service types are configured for this organization.</p> : categoryPerformance.map((category) => {
               const CategoryIcon = category.icon;
 
               return (

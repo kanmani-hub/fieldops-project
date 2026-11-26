@@ -73,11 +73,9 @@ class Organization(Base):
     deleted_by = Column(String(36), nullable=True)
 
     #relationship
-    users = relationship("User",back_populates="organization")
     jobs = relationship("Job",back_populates="organization", foreign_keys="Job.tenant_id")
     technicans=relationship("Technician",back_populates="organization")
     technician_profile=relationship("TechnicianProfile",back_populates="organization")
-    customer_profiles_extended=relationship("CustomerProfileModel",back_populates="organization")
     InApp_Notification=relationship("InAppNotification",back_populates="organization")
 
     # Suspension tracking

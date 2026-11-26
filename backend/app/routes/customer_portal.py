@@ -12,7 +12,8 @@ import logging
 import os
 import requests
 from io import BytesIO
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as datetime_time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from time import perf_counter
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status, Query
@@ -438,19 +439,16 @@ async def get_customer_profile(
 
     profile = db.query(CustomerProfileModel).filter(
         CustomerProfileModel.user_id == current_user.user_id,
-        CustomerProfileModel.tenant_id == current_user.tenant_id,
     ).first()
 
     user = db.query(User).filter(
         User.id == current_user.user_id,
-        User.tenant_id == current_user.tenant_id,
     ).first()
 
     if not profile:
         return CustomerProfileResponse(
             id="",
             user_id=current_user.user_id,
-            tenant_id=current_user.tenant_id,
             full_name=user.full_name if user else "",
             mobile_number=user.phone_number if user else "",
             profile_completed=False,
@@ -462,7 +460,6 @@ async def get_customer_profile(
     return CustomerProfileResponse(
         id=profile.id,
         user_id=profile.user_id,
-        tenant_id=profile.tenant_id,
         full_name=profile.full_name,
         mobile_number=profile.mobile_number,
         address=profile.address,
@@ -494,7 +491,6 @@ async def create_customer_profile(
 
     existing = db.query(CustomerProfileModel).filter(
         CustomerProfileModel.user_id == current_user.user_id,
-        CustomerProfileModel.tenant_id == current_user.tenant_id,
     ).first()
 
     if existing:
@@ -506,7 +502,6 @@ async def create_customer_profile(
     profile = CustomerProfileModel(
         id=str(uuid.uuid4()),
         user_id=current_user.user_id,
-        tenant_id=current_user.tenant_id,
         full_name=data.full_name,
         mobile_number=data.mobile_number,
         address=data.address,
@@ -522,7 +517,6 @@ async def create_customer_profile(
     audit_log(
         db,
         action=AuditAction.PROFILE_CREATED,
-        tenant_id=current_user.tenant_id,
         user_id=current_user.user_id,
         role=current_user.role.value,
         entity_type="customer_profile",
@@ -538,13 +532,11 @@ async def create_customer_profile(
 
     user = db.query(User).filter(
         User.id == current_user.user_id,
-        User.tenant_id == current_user.tenant_id,
     ).first()
 
     return CustomerProfileResponse(
         id=profile.id,
         user_id=profile.user_id,
-        tenant_id=profile.tenant_id,
         full_name=profile.full_name,
         mobile_number=profile.mobile_number,
         address=profile.address,
@@ -575,7 +567,6 @@ async def update_customer_profile(
 
     profile = db.query(CustomerProfileModel).filter(
         CustomerProfileModel.user_id == current_user.user_id,
-        CustomerProfileModel.tenant_id == current_user.tenant_id,
     ).first()
 
     if not profile:
@@ -612,7 +603,6 @@ async def update_customer_profile(
         # Update the main customer User record.
         customer_user = db.query(User).filter(
             User.id == current_user.user_id,
-            User.tenant_id == current_user.tenant_id,
         ).first()
 
         if customer_user:
@@ -673,13 +663,11 @@ async def update_customer_profile(
 
     user = db.query(User).filter(
         User.id == current_user.user_id,
-        User.tenant_id == current_user.tenant_id,
     ).first()
 
     return CustomerProfileResponse(
         id=profile.id,
         user_id=profile.user_id,
-        tenant_id=profile.tenant_id,
         full_name=profile.full_name,
         mobile_number=profile.mobile_number,
         address=profile.address,
@@ -711,7 +699,6 @@ async def change_password(
 
     user = db.query(User).filter(
         User.id == current_user.user_id,
-        User.tenant_id == current_user.tenant_id,
     ).first()
 
     if not user:
@@ -915,7 +902,6 @@ async def create_service_request(
 
     user_rec = db.query(User).filter(
         User.id == current_user.user_id,
-        User.tenant_id == current_user.tenant_id,
     ).first()
 
     cust_first = (
@@ -960,6 +946,10 @@ async def create_service_request(
         parts = data.description.split(" - ")
         if len(parts) >= 2 and parts[0].strip():
             issue_val = parts[0].strip()
+        else:
+            # Legacy mobile clients submit free-form descriptions instead of
+            # the newer service catalogue issue field.
+            issue_val = data.description.strip()
 
     workflow_input = {
         "service": data.service_type,
@@ -1021,7 +1011,7 @@ async def create_service_request(
 
     if not (service_type_for_catalog and category_for_catalog and issue_for_catalog):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Please select a service type, category, and issue from the service catalogue.",
         )
 
@@ -1118,7 +1108,7 @@ async def create_service_request(
         )
         if not organizations:
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
+                status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
                     "No active service provider currently offers the selected "
                     "service, category, and issue. Please choose another service."
@@ -1203,6 +1193,21 @@ async def create_service_request(
                 parsed_visit_time = raw_visit_time
             except Exception:
                 pass
+
+    try:
+        booking_zone = ZoneInfo(selected_timezone or DEFAULT_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        booking_zone = ZoneInfo(DEFAULT_TIMEZONE)
+    booking_now = datetime.now(timezone.utc).astimezone(booking_zone)
+    if (
+        booking_now.time().replace(tzinfo=None) >= datetime_time(20, 0)
+        and data.preferred_visit_date == booking_now.date() + timedelta(days=1)
+        and parsed_visit_time < datetime_time(11, 0)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Bookings made after 8:00 PM must use a service slot from 11:00 AM tomorrow onward.",
+        )
 
     new_job = Job(
         id=real_job_id,
@@ -1646,6 +1651,7 @@ def _customer_invoice_query(
         .filter(
             ServiceRequest.customer_user_id == current_user.user_id,
             ServiceRequest.linked_job_id.isnot(None),
+            or_(current_user.tenant_id is None, ServiceRequest.tenant_id == current_user.tenant_id),
             or_(
                 Job.customer_id == str(current_user.user_id),
                 Job.customer_id.is_(None),
@@ -2074,6 +2080,7 @@ async def track_customer_jobs(
         .join(ServiceRequest, ServiceRequest.linked_job_id == Job.id)
         .filter(
             ServiceRequest.customer_user_id == current_user.user_id,
+            or_(current_user.tenant_id is None, ServiceRequest.tenant_id == current_user.tenant_id),
             ServiceRequest.linked_job_id.isnot(None),
             or_(
                 Job.customer_id == str(current_user.user_id),
@@ -2325,6 +2332,7 @@ async def get_customer_job_detail(
                 Job.customer_id.is_(None),
             ),
             ServiceRequest.customer_user_id == current_user.user_id,
+            or_(current_user.tenant_id is None, ServiceRequest.tenant_id == current_user.tenant_id),
         )
         .first()
     )
@@ -2515,6 +2523,7 @@ async def download_customer_job_report(
         .filter(
             Job.id == job_id,
             ServiceRequest.customer_user_id == current_user.user_id,
+            or_(current_user.tenant_id is None, ServiceRequest.tenant_id == current_user.tenant_id),
             or_(
                 Job.customer_id == str(current_user.user_id),
                 Job.customer_id.is_(None),
@@ -2839,6 +2848,7 @@ def _get_customer_feedback_job(
         .filter(
             ServiceRequest.linked_job_id == job_id,
             ServiceRequest.customer_user_id == current_user.user_id,
+            or_(current_user.tenant_id is None, ServiceRequest.tenant_id == current_user.tenant_id),
         )
         .first()
     )
