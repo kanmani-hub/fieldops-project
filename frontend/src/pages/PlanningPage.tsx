@@ -2101,11 +2101,19 @@ const fetchCompletedCount = async () => {
       "http://localhost:4000"
     ).replace(/\/$/, "");
 
+    const authToken =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem("token") ||
+          window.localStorage.getItem("access_token") ||
+          ""
+        : "";
+
     const socket = io(
       `${socketBaseUrl}/dispatch-dashboard`,
       {
         auth: {
           tenant_id: tenantId,
+          ...(authToken ? { token: authToken } : {}),
         },
         transports: ["websocket", "polling"],
         reconnection: true,

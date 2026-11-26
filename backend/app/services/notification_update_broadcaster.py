@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Union
 
 from app.redis_client import get_redis_client
+from app.services.websocket_tenant_filter import is_valid_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,7 @@ class NotificationUpdateBroadcaster:
         str_tenant = str(tenant_id or "").strip()
         norm_status = normalize_notification_status(status)
 
-        if not str_notification_id or not str_tenant:
+        if not str_notification_id or not is_valid_tenant_id(str_tenant):
             logger.warning(
                 "Invalid notification update parameters: notification_id=%s, tenant_id=%s",
                 str_notification_id,
@@ -174,7 +175,7 @@ class NotificationUpdateBroadcaster:
                 "notification_id": str_notification_id or "n-1",
                 "status": norm_status,
                 "status_code": "REJECTED",
-                "error": "notification_id and tenant_id are mandatory fields",
+                "error": "notification_id and valid tenant_id are mandatory fields",
             }
 
         client = redis_client if redis_client is not None else self.redis

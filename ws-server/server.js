@@ -67,6 +67,139 @@ const seenEventQueue = [];
 // Resilience and failure tracking
 let malformedEventsCount = 0;
 let rejectedEventsCount = 0;
+let crossTenantBlockedCount = 0;
+
+// Tenant-based event filtering helpers
+const TENANT_ROOM_PREFIX = 'tenant:';
+const DISALLOWED_TENANT_VALUES = new Set([
+  '',
+  '*',
+  'all',
+  'global',
+  'broadcast',
+  'none',
+  'null',
+  'undefined',
+]);
+const SAFE_TENANT_REGEX = /^[A-Za-z0-9._:@-]+$/;
+
+function isValidTenantId(tenantId) {
+  if (tenantId === null || tenantId === undefined || typeof tenantId === 'boolean') {
+    return false;
+  }
+  const norm = String(tenantId).trim();
+  if (!norm || DISALLOWED_TENANT_VALUES.has(norm.toLowerCase())) {
+    return false;
+  }
+  if (norm.includes('*') || norm.length > 128) {
+    return false;
+  }
+  return SAFE_TENANT_REGEX.test(norm);
+}
+
+function getTenantRoom(tenantId) {
+  if (!isValidTenantId(tenantId)) {
+    throw new Error('Valid non-empty tenant_id is required to resolve tenant room');
+  }
+  return `${TENANT_ROOM_PREFIX}${String(tenantId).trim()}`;
+}
+
+function validateEventTenant(payload, expectedTenantId = null) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return {
+      allowed: false,
+      status: 'REJECTED',
+      isolation: 'TENANT_ROOM_AND_AUTHORIZATION',
+      code: 'INVALID_EVENT_PAYLOAD',
+      error: 'Event payload must be a JSON object',
+    };
+  }
+
+  const eventName = String(payload.event || payload.event_type || '').trim();
+  if (!isValidTenantId(payload.tenant_id)) {
+    return {
+      allowed: false,
+      status: 'REJECTED',
+      isolation: 'TENANT_ROOM_AND_AUTHORIZATION',
+      code: 'MISSING_OR_INVALID_TENANT_ID',
+      error: 'Valid non-wildcard tenant_id is mandatory on outbound events',
+      event: eventName || null,
+    };
+  }
+
+  const normTenant = String(payload.tenant_id).trim();
+
+  // Reject nested payload/data tenant_id tampering
+  for (const nestedKey of ['payload', 'data']) {
+    const nested = payload[nestedKey];
+    if (nested && typeof nested === 'object' && !Array.isArray(nested) && nested.tenant_id !== undefined && nested.tenant_id !== null) {
+      const nestedTenant = String(nested.tenant_id).trim();
+      if (nestedTenant && nestedTenant !== normTenant) {
+        return {
+          allowed: false,
+          status: 'REJECTED',
+          isolation: 'TENANT_ROOM_AND_AUTHORIZATION',
+          code: 'CROSS_TENANT_NESTED_MISMATCH',
+          error: 'Nested payload tenant_id does not match event tenant_id',
+          event: eventName || null,
+        };
+      }
+    }
+  }
+
+  if (expectedTenantId !== null && expectedTenantId !== undefined && String(expectedTenantId).trim() !== '') {
+    const normExpected = String(expectedTenantId).trim();
+    if (normTenant !== normExpected) {
+      return {
+        allowed: false,
+        status: 'REJECTED',
+        isolation: 'TENANT_ROOM_AND_AUTHORIZATION',
+        code: 'CROSS_TENANT_EVENT_BLOCKED',
+        error: 'Event tenant_id does not match authorized target tenant',
+        event: eventName || null,
+      };
+    }
+  }
+
+  return {
+    allowed: true,
+    status: 'FILTERED',
+    isolation: 'TENANT_ROOM_AND_AUTHORIZATION',
+    tenantId: normTenant,
+    room: getTenantRoom(normTenant),
+    event: eventName || null,
+  };
+}
+
+function validateAndEmitTenantEvent(eventName, payload, expectedTenantId = null) {
+  if (!eventName || typeof eventName !== 'string') {
+    malformedEventsCount++;
+    rejectedEventsCount++;
+    return { delivered: false, status: 'REJECTED', code: 'INVALID_EVENT_NAME' };
+  }
+
+  const validation = validateEventTenant(payload, expectedTenantId);
+  if (!validation.allowed) {
+    rejectedEventsCount++;
+    if (validation.code && validation.code.startsWith('CROSS_TENANT')) {
+      crossTenantBlockedCount++;
+    } else {
+      malformedEventsCount++;
+    }
+    console.warn(`[Tenant Filter] Blocked outbound [${eventName}] (${validation.code}): ${validation.error}`);
+    return { delivered: false, ...validation };
+  }
+
+  dispatchNamespace.to(validation.room).emit(eventName, payload);
+  messagesSent++;
+  return {
+    delivered: true,
+    status: 'FILTERED',
+    isolation: 'TENANT_ROOM_AND_AUTHORIZATION',
+    tenantId: validation.tenantId,
+    room: validation.room,
+  };
+}
 
 
 function isDuplicateEvent(eventId) {
@@ -172,6 +305,9 @@ dispatchNamespace.use((socket, next) => {
       socket.role = verifiedRole;
       socket.tenantSource = 'VERIFIED_TOKEN_CLAIMS';
       socket.authenticated = true;
+      if (!isValidTenantId(socket.tenantId)) {
+        return next(new Error('Authentication error: Invalid tenant claim'));
+      }
       return next();
     } catch (err) {
       console.warn(`[Authentication Error] WebSocket handshake rejected for IP ${ip}: ${err.message}`);
@@ -182,7 +318,10 @@ dispatchNamespace.use((socket, next) => {
   // Fallback for development/testing when no token is provided
   const allowFallback = process.env.ALLOW_UNAUTHENTICATED_FALLBACK !== 'false';
   if (allowFallback && clientTenantId) {
-    socket.tenantId = String(clientTenantId);
+    if (!isValidTenantId(clientTenantId)) {
+      return next(new Error('Authentication error: Invalid tenant_id'));
+    }
+    socket.tenantId = String(clientTenantId).trim();
     socket.tenantSource = 'QUERY_PARAM_FALLBACK';
     socket.authenticated = true;
     socket.role = 'anonymous';
@@ -202,16 +341,19 @@ dispatchNamespace.use((socket, next) => {
 dispatchNamespace.on('connection', (socket) => {
   totalConnections++;
   const tenantId = socket.tenantId;
+  const tenantRoom = getTenantRoom(tenantId);
   const ip = socket.handshake.address;
   
-  console.log(`[+] Client connected: ${socket.id} to tenant: ${tenantId}`);
-  socket.join(tenantId);
+  console.log(`[+] Client connected: ${socket.id} to tenant room: ${tenantRoom}`);
+  socket.join(tenantRoom);
+  socket.tenantRoom = tenantRoom;
   
   // Connection Authentication: Emit verified authentication status
   socket.emit('auth.status', {
     status: 'AUTHENTICATED',
     tenant_source: socket.tenantSource || 'VERIFIED_TOKEN_CLAIMS',
     tenant_id: tenantId,
+    tenant_room: tenantRoom,
   });
 
   // Connection-State Recovery: Notify client of recovery status
@@ -254,6 +396,28 @@ dispatchNamespace.on('connection', (socket) => {
   socket.on('override_assignment', rejectStatusMutation);
   socket.on('mutate_dispatch', rejectStatusMutation);
 
+  // Security: Prevent clients from joining unauthorized or cross-tenant rooms
+  const rejectUnauthorizedRoomJoin = (data, callback) => {
+    const requestedTenant = data && typeof data === 'object' ? (data.tenant_id || data.room) : data;
+    crossTenantBlockedCount++;
+    rejectedEventsCount++;
+    console.warn(`[Security] Client ${socket.id} (tenant=${tenantId}) attempted unauthorized room join (${requestedTenant}). Rejected.`);
+    if (typeof callback === 'function') {
+      callback({
+        error: 'Cross-tenant or client-directed room subscription forbidden.',
+        status: 'FORBIDDEN',
+        isolation: 'TENANT_ROOM_AND_AUTHORIZATION',
+      });
+    }
+  };
+
+  socket.on('join', rejectUnauthorizedRoomJoin);
+  socket.on('join_room', rejectUnauthorizedRoomJoin);
+  socket.on('join_tenant_room', rejectUnauthorizedRoomJoin);
+  socket.on('subscribe', rejectUnauthorizedRoomJoin);
+  socket.on('subscribe_tenant', rejectUnauthorizedRoomJoin);
+  socket.on('switch_tenant', rejectUnauthorizedRoomJoin);
+
 
   socket.on('disconnect', () => {
     totalConnections--;
@@ -280,13 +444,20 @@ redisSubscriber.on('message', (channel, message) => {
     try {
       const payload = JSON.parse(message);
       
-      const { event, tenant_id, event_id } = payload;
-      
-      if (!event || !tenant_id) {
-        console.warn('Received malformed event (missing required event or tenant_id):', payload);
+      const { event, event_id } = payload || {};
+      const tenantCheck = validateEventTenant(payload);
+
+      if (!event || !tenantCheck.allowed) {
+        console.warn('Received malformed or unauthorized tenant event:', tenantCheck.error || 'missing event');
         malformedEventsCount++;
+        rejectedEventsCount++;
+        if (tenantCheck.code && tenantCheck.code.startsWith('CROSS_TENANT')) {
+          crossTenantBlockedCount++;
+        }
         return;
       }
+
+      const tenant_id = tenantCheck.tenantId;
       
       if (isDuplicateEvent(event_id)) {
         console.log(`[Deduplication] Skipping duplicate broadcast for event_id: ${event_id}`);
@@ -294,10 +465,12 @@ redisSubscriber.on('message', (channel, message) => {
       }
       
       // Broadcast to all clients in the specific tenant room
-      dispatchNamespace.to(tenant_id).emit(event, payload);
-      messagesSent++;
+      const primaryEmit = validateAndEmitTenantEvent(event, payload, tenant_id);
+      if (!primaryEmit.delivered) {
+        return;
+      }
       
-      console.log(`Broadcasted [${event}] to tenant [${tenant_id}]`);
+      console.log(`Broadcasted [${event}] to tenant room [${primaryEmit.room}]`);
 
       // If payload represents a status change and event was not already job.status.updated,
       // also broadcast canonical job.status.updated event
@@ -313,8 +486,7 @@ redisSubscriber.on('message', (channel, message) => {
           correlation_id: payload.correlation_id,
           event_id: payload.event_id,
         };
-        dispatchNamespace.to(tenant_id).emit('job.status.updated', canonicalPayload);
-        messagesSent++;
+        validateAndEmitTenantEvent('job.status.updated', canonicalPayload, tenant_id);
       }
 
       // If payload represents a location change and event was not already technician.location.updated,
@@ -335,8 +507,7 @@ redisSubscriber.on('message', (channel, message) => {
           correlation_id: payload.correlation_id,
           event_id: payload.event_id,
         };
-        dispatchNamespace.to(tenant_id).emit('technician.location.updated', canonicalLocPayload);
-        messagesSent++;
+        validateAndEmitTenantEvent('technician.location.updated', canonicalLocPayload, tenant_id);
       }
 
       // If payload represents a dispatch update and event was not already dispatch.updated,
@@ -355,8 +526,7 @@ redisSubscriber.on('message', (channel, message) => {
           correlation_id: payload.correlation_id,
           event_id: payload.event_id,
         };
-        dispatchNamespace.to(tenant_id).emit('dispatch.updated', canonicalDispatchPayload);
-        messagesSent++;
+        validateAndEmitTenantEvent('dispatch.updated', canonicalDispatchPayload, tenant_id);
       }
 
       // If payload represents an SLA alert and event was not already sla.alert,
@@ -388,8 +558,7 @@ redisSubscriber.on('message', (channel, message) => {
           correlation_id: payload.correlation_id,
           event_id: payload.event_id,
         };
-        dispatchNamespace.to(tenant_id).emit('sla.alert', canonicalSLAPayload);
-        messagesSent++;
+        validateAndEmitTenantEvent('sla.alert', canonicalSLAPayload, tenant_id);
       }
 
       // If payload represents a notification update and event was not already notification.updated,
@@ -414,8 +583,7 @@ redisSubscriber.on('message', (channel, message) => {
           correlation_id: payload.correlation_id,
           event_id: payload.event_id,
         };
-        dispatchNamespace.to(tenant_id).emit('notification.updated', canonicalNotificationPayload);
-        messagesSent++;
+        validateAndEmitTenantEvent('notification.updated', canonicalNotificationPayload, tenant_id);
       }
 
       // If payload represents a payment update and event was not already payment.updated,
@@ -441,8 +609,7 @@ redisSubscriber.on('message', (channel, message) => {
           correlation_id: payload.correlation_id,
           event_id: payload.event_id,
         };
-        dispatchNamespace.to(tenant_id).emit('payment.updated', canonicalPaymentPayload);
-        messagesSent++;
+        validateAndEmitTenantEvent('payment.updated', canonicalPaymentPayload, tenant_id);
       }
       
     } catch (e) {
@@ -588,9 +755,9 @@ app.post('/payments/broadcast', (req, res) => {
   const { tenant_id, event_id } = payload;
   const payment_status = payload.payment_status || payload.status || 'PAID';
 
-  if (!invoice_id || !tenant_id) {
+  if (!invoice_id || !isValidTenantId(tenant_id)) {
     return res.status(400).json({
-      error: 'invoice_id and tenant_id are mandatory fields',
+      error: 'invoice_id and valid tenant_id are mandatory fields',
     });
   }
 
@@ -624,8 +791,10 @@ app.post('/payments/broadcast', (req, res) => {
     event_id: event_id,
   };
 
-  dispatchNamespace.to(tenant_id).emit('payment.updated', canonicalPayload);
-  messagesSent++;
+  const emitResult = validateAndEmitTenantEvent('payment.updated', canonicalPayload, req.headers['x-tenant-id']);
+  if (!emitResult.delivered) {
+    return res.status(emitResult.code && emitResult.code.startsWith('CROSS_TENANT') ? 403 : 400).json(emitResult);
+  }
 
   return res.json({
     event: 'payment.updated',
@@ -644,9 +813,9 @@ app.post('/notifications/broadcast', (req, res) => {
   }
 
   const { notification_id, status, tenant_id, event_id } = payload;
-  if (!notification_id || !tenant_id) {
+  if (!notification_id || !isValidTenantId(tenant_id)) {
     return res.status(400).json({
-      error: 'notification_id and tenant_id are mandatory fields',
+      error: 'notification_id and valid tenant_id are mandatory fields',
     });
   }
 
@@ -679,8 +848,10 @@ app.post('/notifications/broadcast', (req, res) => {
     event_id: event_id,
   };
 
-  dispatchNamespace.to(tenant_id).emit('notification.updated', canonicalPayload);
-  messagesSent++;
+  const emitResult = validateAndEmitTenantEvent('notification.updated', canonicalPayload, req.headers['x-tenant-id']);
+  if (!emitResult.delivered) {
+    return res.status(emitResult.code && emitResult.code.startsWith('CROSS_TENANT') ? 403 : 400).json(emitResult);
+  }
 
   return res.json({
     event: 'notification.updated',
@@ -699,9 +870,9 @@ app.post('/sla-alerts/broadcast', (req, res) => {
   }
 
   const { job_id, severity, tenant_id, event_id } = payload;
-  if (!job_id || !tenant_id) {
+  if (!job_id || !isValidTenantId(tenant_id)) {
     return res.status(400).json({
-      error: 'job_id and tenant_id are mandatory fields',
+      error: 'job_id and valid tenant_id are mandatory fields',
     });
   }
 
@@ -732,8 +903,10 @@ app.post('/sla-alerts/broadcast', (req, res) => {
     event_id: event_id,
   };
 
-  dispatchNamespace.to(tenant_id).emit('sla.alert', canonicalPayload);
-  messagesSent++;
+  const emitResult = validateAndEmitTenantEvent('sla.alert', canonicalPayload, req.headers['x-tenant-id']);
+  if (!emitResult.delivered) {
+    return res.status(emitResult.code && emitResult.code.startsWith('CROSS_TENANT') ? 403 : 400).json(emitResult);
+  }
 
   return res.json({
     event: 'sla.alert',
@@ -752,9 +925,9 @@ app.post('/dispatch/broadcast', (req, res) => {
   }
 
   const { job_id, assignment_id, tenant_id, event_id } = payload;
-  if (!job_id || !assignment_id || !tenant_id) {
+  if (!job_id || !assignment_id || !isValidTenantId(tenant_id)) {
     return res.status(400).json({
-      error: 'job_id, assignment_id, and tenant_id are mandatory fields',
+      error: 'job_id, assignment_id, and valid tenant_id are mandatory fields',
     });
   }
 
@@ -783,8 +956,10 @@ app.post('/dispatch/broadcast', (req, res) => {
     event_id: event_id,
   };
 
-  dispatchNamespace.to(tenant_id).emit('dispatch.updated', canonicalPayload);
-  messagesSent++;
+  const emitResult = validateAndEmitTenantEvent('dispatch.updated', canonicalPayload, req.headers['x-tenant-id']);
+  if (!emitResult.delivered) {
+    return res.status(emitResult.code && emitResult.code.startsWith('CROSS_TENANT') ? 403 : 400).json(emitResult);
+  }
 
   return res.json({
     event: 'dispatch.updated',
@@ -803,9 +978,9 @@ app.post('/technician-location/broadcast', (req, res) => {
   }
 
   const { technician_id, tenant_id, latitude, longitude, event_id } = payload;
-  if (!technician_id || !tenant_id || latitude === undefined || longitude === undefined) {
+  if (!technician_id || !isValidTenantId(tenant_id) || latitude === undefined || longitude === undefined) {
     return res.status(400).json({
-      error: 'technician_id, tenant_id, latitude, and longitude are mandatory fields',
+      error: 'technician_id, valid tenant_id, latitude, and longitude are mandatory fields',
     });
   }
 
@@ -835,8 +1010,10 @@ app.post('/technician-location/broadcast', (req, res) => {
     event_id: event_id,
   };
 
-  dispatchNamespace.to(tenant_id).emit('technician.location.updated', canonicalPayload);
-  messagesSent++;
+  const emitResult = validateAndEmitTenantEvent('technician.location.updated', canonicalPayload, req.headers['x-tenant-id']);
+  if (!emitResult.delivered) {
+    return res.status(emitResult.code && emitResult.code.startsWith('CROSS_TENANT') ? 403 : 400).json(emitResult);
+  }
 
   return res.json({
     event: 'technician.location.updated',
@@ -856,9 +1033,9 @@ app.post('/job-status/broadcast', (req, res) => {
   }
 
   const { job_id, status, tenant_id, event_id } = payload;
-  if (!job_id || !status || !tenant_id) {
+  if (!job_id || !status || !isValidTenantId(tenant_id)) {
     return res.status(400).json({
-      error: 'job_id, status, and tenant_id are mandatory fields',
+      error: 'job_id, status, and valid tenant_id are mandatory fields',
     });
   }
 
@@ -884,8 +1061,10 @@ app.post('/job-status/broadcast', (req, res) => {
     event_id: event_id,
   };
 
-  dispatchNamespace.to(tenant_id).emit('job.status.updated', canonicalPayload);
-  messagesSent++;
+  const emitResult = validateAndEmitTenantEvent('job.status.updated', canonicalPayload, req.headers['x-tenant-id']);
+  if (!emitResult.delivered) {
+    return res.status(emitResult.code && emitResult.code.startsWith('CROSS_TENANT') ? 403 : 400).json(emitResult);
+  }
 
   return res.json({
     event: 'job.status.updated',
@@ -906,9 +1085,9 @@ app.post('/bridge/kafka-event', (req, res) => {
   const { event, event_type, tenant_id, event_id } = payload;
   const eventName = event || event_type;
 
-  if (!eventName || !tenant_id) {
+  if (!eventName || !isValidTenantId(tenant_id)) {
     return res.status(400).json({
-      error: 'Missing required fields: event/event_type and tenant_id are mandatory',
+      error: 'Missing required fields: event/event_type and valid tenant_id are mandatory',
     });
   }
 
@@ -922,8 +1101,10 @@ app.post('/bridge/kafka-event', (req, res) => {
     });
   }
 
-  dispatchNamespace.to(tenant_id).emit(eventName, payload);
-  messagesSent++;
+  const emitResult = validateAndEmitTenantEvent(eventName, payload, req.headers['x-tenant-id']);
+  if (!emitResult.delivered) {
+    return res.status(emitResult.code && emitResult.code.startsWith('CROSS_TENANT') ? 403 : 400).json(emitResult);
+  }
 
   return res.json({
     status: 'CONNECTED',
@@ -976,6 +1157,8 @@ app.get('/metrics', (req, res) => {
     uptime_seconds: process.uptime(),
     malformed_events: malformedEventsCount,
     rejected_events: rejectedEventsCount,
+    cross_tenant_blocked: crossTenantBlockedCount,
+    tenant_filtering: 'ENABLED',
     failure_handling: 'ENABLED',
     redis_subscriber: {
       status: redisSubscriber.status,
@@ -984,6 +1167,42 @@ app.get('/metrics', (req, res) => {
       reconnect_attempts: redisReconnectCount,
     }
   });
+});
+
+// Canonical Tenant-Based Event Filtering status endpoint
+app.get('/tenant-filtering/status', (req, res) => {
+  res.json({
+    status: 'FILTERED',
+    isolation: 'TENANT_ROOM_AND_AUTHORIZATION',
+  });
+});
+
+// Canonical Tenant-Based Event Filtering config endpoint
+app.get('/tenant-filtering/config', (req, res) => {
+  res.json({
+    status: 'FILTERED',
+    isolation: 'TENANT_ROOM_AND_AUTHORIZATION',
+    namespace: '/dispatch-dashboard',
+    room_prefix: TENANT_ROOM_PREFIX,
+    room_format: 'tenant:{tenant_id}',
+    require_tenant_id: true,
+    validate_before_broadcast: true,
+    cross_tenant_protection: true,
+    wildcard_tenants_blocked: true,
+    source_of_truth: 'POSTGRESQL',
+  });
+});
+
+// Validate event tenant and authorization scope endpoint
+app.post('/tenant-filtering/validate', (req, res) => {
+  const body = req.body || {};
+  const eventPayload = body.event_payload !== undefined ? body.event_payload : body;
+  const targetTenant = body.socket_tenant_id || body.target_tenant_id || req.headers['x-tenant-id'] || null;
+  const validation = validateEventTenant(eventPayload, targetTenant);
+  if (!validation.allowed) {
+    return res.status(validation.code && validation.code.startsWith('CROSS_TENANT') ? 403 : 400).json(validation);
+  }
+  return res.json(validation);
 });
 
 
@@ -1038,6 +1257,22 @@ app.post('/auth/verify', (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Dispatch WebSocket Server running on port ${PORT}`);
-});
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`Dispatch WebSocket Server running on port ${PORT}`);
+  });
+}
+
+module.exports = {
+  app,
+  server,
+  io,
+  dispatchNamespace,
+  redisSubscriber,
+  isValidTenantId,
+  getTenantRoom,
+  validateEventTenant,
+  validateAndEmitTenantEvent,
+  verifyJwtToken,
+  isDuplicateEvent,
+};

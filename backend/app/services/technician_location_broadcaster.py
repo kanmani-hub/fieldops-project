@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Union
 
 from app.redis_client import get_redis_client
+from app.services.websocket_tenant_filter import is_valid_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ class TechnicianLocationBroadcaster:
                 "error": "Coordinates must be valid floating point numbers",
             }
 
-        if not str_tech_id or not str_tenant:
+        if not str_tech_id or not is_valid_tenant_id(str_tenant):
             return {
                 "event": "technician.location.updated",
                 "tenant_id": str_tenant or "tenant-1",
@@ -133,7 +134,7 @@ class TechnicianLocationBroadcaster:
                 "latitude": lat,
                 "longitude": lng,
                 "status_code": "REJECTED",
-                "error": "technician_id and tenant_id are mandatory fields",
+                "error": "technician_id and valid tenant_id are mandatory fields",
             }
 
         if not (-90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0):

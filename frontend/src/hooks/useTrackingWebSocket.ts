@@ -729,6 +729,40 @@ export const useTrackingWebSocket = (
               }
 
               // --------------------------------------------------------------
+              // TENANT ISOLATION GUARD FOR INBOUND DATA FRAMES
+              // --------------------------------------------------------------
+
+              const authorizedTenant =
+                trackingTenant ||
+                finalTenant;
+
+              if (
+                authorizedTenant &&
+                data.tenant_id !==
+                  undefined &&
+                data.tenant_id !==
+                  null &&
+                String(
+                  data.tenant_id,
+                ).trim() !==
+                  String(
+                    authorizedTenant,
+                  ).trim()
+              ) {
+                dbg(
+                  'ignored cross-tenant tracking frame',
+                  {
+                    expectedTenant:
+                      authorizedTenant,
+                    receivedTenant:
+                      data.tenant_id,
+                  },
+                );
+
+                return;
+              }
+
+              // --------------------------------------------------------------
               // GEOFENCE EVENT
               // --------------------------------------------------------------
 

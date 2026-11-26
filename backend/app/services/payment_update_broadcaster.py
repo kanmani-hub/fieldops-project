@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Union
 
 from app.redis_client import get_redis_client
+from app.services.websocket_tenant_filter import is_valid_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,7 @@ class PaymentUpdateBroadcaster:
         raw_status = payment_status or status or "PAID"
         norm_status = normalize_payment_status(raw_status)
 
-        if not str_invoice_id or not str_tenant:
+        if not str_invoice_id or not is_valid_tenant_id(str_tenant):
             logger.warning(
                 "Invalid payment update parameters: invoice_id=%s, tenant_id=%s",
                 str_invoice_id,
@@ -168,7 +169,7 @@ class PaymentUpdateBroadcaster:
                 "invoice_id": str_invoice_id or "10001",
                 "payment_status": norm_status,
                 "status_code": "REJECTED",
-                "error": "invoice_id and tenant_id are mandatory fields",
+                "error": "invoice_id and valid tenant_id are mandatory fields",
             }
 
         client = redis_client if redis_client is not None else self.redis

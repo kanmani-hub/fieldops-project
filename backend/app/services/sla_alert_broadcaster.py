@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Union
 
 from app.redis_client import get_redis_client
+from app.services.websocket_tenant_filter import is_valid_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,7 @@ class SLAAlertBroadcaster:
         raw_severity = str(severity or "AT_RISK").strip().upper()
         norm_severity = raw_severity if raw_severity in VALID_SEVERITIES else "AT_RISK"
 
-        if not str_job_id or not str_tenant:
+        if not str_job_id or not is_valid_tenant_id(str_tenant):
             logger.warning(
                 "Invalid SLA alert parameters: job_id=%s, tenant_id=%s",
                 str_job_id,
@@ -128,7 +129,7 @@ class SLAAlertBroadcaster:
                 "job_id": str_job_id or "123",
                 "severity": norm_severity,
                 "status_code": "REJECTED",
-                "error": "job_id and tenant_id are mandatory fields",
+                "error": "job_id and valid tenant_id are mandatory fields",
             }
 
         client = redis_client if redis_client is not None else self.redis

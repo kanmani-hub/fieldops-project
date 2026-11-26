@@ -4768,6 +4768,58 @@ AddConnectionAuthenticationTask = validate_connection_authentication_task
 Add_connection_authentication_task = validate_connection_authentication_task
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Tenant-Based Event Filtering Celery Task
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.filter_tenant_events_task",
+)
+def filter_tenant_events_task(
+    event_payload: Optional[dict] = None,
+    socket_tenant_id: Optional[Union[str, int]] = None,
+    target_room: Optional[str] = None,
+    allow_cross_tenant_scope: bool = False,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to validate and filter outbound WebSocket events by tenant and scope."""
+    from app.services.websocket_tenant_filter import filter_tenant_events
+    return filter_tenant_events(
+        event_payload=event_payload,
+        socket_tenant_id=socket_tenant_id,
+        target_room=target_room,
+        allow_cross_tenant_scope=allow_cross_tenant_scope,
+    )
+
+
+from app.services.websocket_tenant_filter import (
+    DEFAULT_TENANT_FILTER_CONFIG,
+    TENANT_ROOM_PREFIX,
+    CANONICAL_TENANT_REQUIRED_EVENTS,
+    is_valid_tenant_id,
+    format_tenant_room,
+    format_tenant_scoped_room,
+    extract_tenant_from_room,
+    validate_event_tenant,
+    filter_tenant_events,
+    get_tenant_filter_config,
+    get_tenant_filter_status,
+    TenantEventFilterService,
+    AddTenantBasedEventFiltering,
+    Add_tenant_based_event_filtering,
+    FilterTenantEvents,
+    Filter_tenant_events,
+    validate_tenant_event_filter,
+    get_tenant_filtering_status,
+    get_tenant_filtering_config,
+)
+
+FilterTenantEventsTask = filter_tenant_events_task
+Filter_tenant_events_task = filter_tenant_events_task
+AddTenantBasedEventFilteringTask = filter_tenant_events_task
+Add_tenant_based_event_filtering_task = filter_tenant_events_task
+
+
 
 
 

@@ -1,5 +1,5 @@
 from typing import Optional, Any, Dict, List
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.services.task_queue import PriorityTaskQueue
 from app.redis_client import get_redis_client
@@ -21,6 +21,24 @@ router = APIRouter(
 def get_task_queue() -> PriorityTaskQueue:
     redis = get_redis_client()
     return PriorityTaskQueue(redis)
+
+
+def _resolve_authorized_ws_tenant(payload: dict, current_user: AuthenticatedUser) -> str:
+    """Resolve and enforce tenant isolation for admin WebSocket broadcast endpoints."""
+    user_tenant = getattr(current_user, "tenant_id", None)
+    user_role = str(getattr(getattr(current_user, "role", None), "value", getattr(current_user, "role", "")) or "").lower()
+    requested_tenant = payload.get("tenant_id") if isinstance(payload, dict) else None
+
+    if requested_tenant is not None and str(requested_tenant).strip():
+        req_str = str(requested_tenant).strip()
+        if user_tenant and str(user_tenant).strip() != req_str and user_role != "super_admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Cross-tenant event broadcast forbidden",
+            )
+        return req_str
+
+    return str(user_tenant or "tenant-1")
 
 
 @router.get(
@@ -1891,8 +1909,9 @@ def post_bridge_kafka_event_endpoint(
 ) -> dict:
     """Bridge an incoming Kafka event payload into the WebSocket server with tenant isolation and deduplication."""
     from app.services.kafka_to_websocket_bridge import bridge_kafka_event_to_websocket
-    if "tenant_id" not in payload and getattr(current_user, "tenant_id", None):
-        payload["tenant_id"] = str(current_user.tenant_id)
+    resolved_tenant = _resolve_authorized_ws_tenant(payload, current_user)
+    payload = dict(payload)
+    payload["tenant_id"] = resolved_tenant
     return bridge_kafka_event_to_websocket(payload)
 
 
@@ -1951,7 +1970,7 @@ def post_send_job_status_update_endpoint(
 
     job_id = payload.get("job_id", "123")
     status = payload.get("status", "ASSIGNED")
-    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+    tenant_id = _resolve_authorized_ws_tenant(payload, current_user)
 
     return send_job_status_updates(
         job_id=job_id,
@@ -2022,7 +2041,7 @@ def post_send_technician_location_update_endpoint(
     technician_id = payload.get("technician_id", "tech-1")
     latitude = payload.get("latitude", 0.0)
     longitude = payload.get("longitude", 0.0)
-    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+    tenant_id = _resolve_authorized_ws_tenant(payload, current_user)
 
     return send_technician_location_updates(
         technician_id=technician_id,
@@ -2096,7 +2115,7 @@ def post_send_dispatch_update_endpoint(
 
     job_id = payload.get("job_id", "123")
     assignment_id = payload.get("assignment_id", "456")
-    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+    tenant_id = _resolve_authorized_ws_tenant(payload, current_user)
 
     return send_dispatch_updates(
         job_id=job_id,
@@ -2171,7 +2190,7 @@ def post_send_sla_alert_endpoint(
 
     job_id = payload.get("job_id", "123")
     severity = payload.get("severity", "AT_RISK")
-    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+    tenant_id = _resolve_authorized_ws_tenant(payload, current_user)
 
     return send_sla_alerts(
         job_id=job_id,
@@ -2246,7 +2265,7 @@ def post_send_notification_update_endpoint(
 
     notification_id = payload.get("notification_id", "n-1")
     status = payload.get("status", "SENT")
-    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+    tenant_id = _resolve_authorized_ws_tenant(payload, current_user)
 
     return send_notification_updates(
         notification_id=notification_id,
@@ -2323,7 +2342,7 @@ def post_send_payment_update_endpoint(
 
     invoice_id = payload.get("invoice_id") or payload.get("payment_id", "10001")
     payment_status = payload.get("payment_status") or payload.get("status", "PAID")
-    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+    tenant_id = _resolve_authorized_ws_tenant(payload, current_user)
 
     return send_payment_updates(
         invoice_id=invoice_id,
@@ -2537,6 +2556,74 @@ def post_websocket_auth_verify_endpoint(
         tenant_id=tenant_id,
         role=role,
         allow_fallback=allow_fallback,
+    )
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Tenant-Based Event Filtering Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/websocket/tenant-filtering/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_tenant_filtering_status_endpoint() -> dict:
+    """Return canonical status for tenant-based WebSocket event filtering."""
+    from app.services.websocket_tenant_filter import get_tenant_filter_status
+    return get_tenant_filter_status()
+
+
+@router.get(
+    "/websocket/tenant-filtering/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_tenant_filtering_config_endpoint() -> dict:
+    """Return operational configuration for tenant-based WebSocket event filtering."""
+    from app.services.websocket_tenant_filter import get_tenant_filter_config
+    return get_tenant_filter_config()
+
+
+@router.post(
+    "/websocket/tenant-filtering/validate",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_websocket_tenant_filtering_validate_endpoint(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Validate an outbound WebSocket event against tenant room and authorization boundaries."""
+    from app.services.websocket_tenant_filter import filter_tenant_events
+
+    event_payload = payload.get("event_payload") if isinstance(payload, dict) and "event_payload" in payload else payload
+    socket_tenant = payload.get("socket_tenant_id") if isinstance(payload, dict) else None
+    if socket_tenant is None:
+        socket_tenant = getattr(current_user, "tenant_id", None)
+    target_room = payload.get("target_room") if isinstance(payload, dict) else None
+    allow_cross_tenant = bool(payload.get("allow_cross_tenant_scope", False)) if isinstance(payload, dict) else False
+
+    return filter_tenant_events(
+        event_payload=event_payload,
+        socket_tenant_id=socket_tenant,
+        target_room=target_room,
+        allow_cross_tenant_scope=allow_cross_tenant,
     )
 
 

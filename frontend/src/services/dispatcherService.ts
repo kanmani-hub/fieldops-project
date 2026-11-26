@@ -158,6 +158,89 @@ export interface FailureHandlingConfig {
   circuit_breaker_enabled?: boolean;
 }
 
+export interface TenantFilteringConfig {
+  status: "FILTERED" | "REJECTED" | string;
+  isolation: "TENANT_ROOM_AND_AUTHORIZATION" | string;
+  room_prefix?: string;
+}
+
+export const DEFAULT_TENANT_FILTERING_CONFIG: TenantFilteringConfig = {
+  status: "FILTERED",
+  isolation: "TENANT_ROOM_AND_AUTHORIZATION",
+  room_prefix: "tenant:",
+};
+
+const DISALLOWED_TENANT_VALUES = new Set([
+  "",
+  "*",
+  "all",
+  "global",
+  "broadcast",
+  "none",
+  "null",
+  "undefined",
+]);
+
+export const isValidTenantId = (tenantId: unknown): boolean => {
+  if (tenantId === null || tenantId === undefined || typeof tenantId === "boolean") {
+    return false;
+  }
+  const norm = String(tenantId).trim();
+  if (!norm || DISALLOWED_TENANT_VALUES.has(norm.toLowerCase())) {
+    return false;
+  }
+  return !norm.includes("*") && norm.length <= 128;
+};
+
+export const getTenantRoom = (tenantId: string): string => {
+  const norm = String(tenantId || "").trim();
+  return `tenant:${norm}`;
+};
+
+export const resolveExpectedTenantId = (
+  socket?: any,
+  explicitTenantId?: string | null
+): string | null => {
+  if (isValidTenantId(explicitTenantId)) {
+    return String(explicitTenantId).trim();
+  }
+  const socketTenant =
+    socket?.tenantId ??
+    socket?.auth?.tenant_id ??
+    socket?.io?.opts?.auth?.tenant_id;
+  if (isValidTenantId(socketTenant)) {
+    return String(socketTenant).trim();
+  }
+  if (typeof window !== "undefined") {
+    try {
+      const stored = window.localStorage?.getItem("tenant_id");
+      if (isValidTenantId(stored)) {
+        return String(stored).trim();
+      }
+    } catch {
+      // Ignore storage access errors
+    }
+  }
+  return null;
+};
+
+export const isAuthorizedTenantEvent = (
+  payload: any,
+  expectedTenantId?: string | null
+): boolean => {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return false;
+  }
+  if (!isValidTenantId(payload.tenant_id)) {
+    return false;
+  }
+  const eventTenant = String(payload.tenant_id).trim();
+  if (expectedTenantId !== undefined && expectedTenantId !== null && String(expectedTenantId).trim() !== "") {
+    return eventTenant === String(expectedTenantId).trim();
+  }
+  return true;
+};
+
 
 export const DEFAULT_SOCKET_RECONNECT_OPTIONS = {
   reconnection: true,
@@ -177,10 +260,15 @@ export const DEFAULT_SOCKET_RECONNECT_OPTIONS = {
  */
 export const subscribeDispatchUpdates = (
   socket: any,
-  callback: (event: DispatchUpdatePayload) => void
+  callback: (event: DispatchUpdatePayload) => void,
+  expectedTenantId?: string | null
 ): (() => void) => {
   if (!socket) return () => {};
   const handler = (payload: DispatchUpdatePayload) => {
+    const targetTenant = resolveExpectedTenantId(socket, expectedTenantId);
+    if (!isAuthorizedTenantEvent(payload, targetTenant)) {
+      return;
+    }
     callback(payload);
   };
   socket.on("dispatch.updated", handler);
@@ -196,10 +284,15 @@ export const subscribeDispatchUpdates = (
  */
 export const subscribeJobStatusUpdates = (
   socket: any,
-  callback: (event: JobStatusUpdatePayload) => void
+  callback: (event: JobStatusUpdatePayload) => void,
+  expectedTenantId?: string | null
 ): (() => void) => {
   if (!socket) return () => {};
   const handler = (payload: JobStatusUpdatePayload) => {
+    const targetTenant = resolveExpectedTenantId(socket, expectedTenantId);
+    if (!isAuthorizedTenantEvent(payload, targetTenant)) {
+      return;
+    }
     callback(payload);
   };
   socket.on("job.status.updated", handler);
@@ -213,10 +306,15 @@ export const subscribeJobStatusUpdates = (
  */
 export const subscribeSLAAlerts = (
   socket: any,
-  callback: (event: SLAAlertPayload) => void
+  callback: (event: SLAAlertPayload) => void,
+  expectedTenantId?: string | null
 ): (() => void) => {
   if (!socket) return () => {};
   const handler = (payload: SLAAlertPayload) => {
+    const targetTenant = resolveExpectedTenantId(socket, expectedTenantId);
+    if (!isAuthorizedTenantEvent(payload, targetTenant)) {
+      return;
+    }
     callback(payload);
   };
   socket.on("sla.alert", handler);
@@ -234,10 +332,15 @@ export const subscribeSLAAlerts = (
  */
 export const subscribeNotificationUpdates = (
   socket: any,
-  callback: (event: NotificationUpdatePayload) => void
+  callback: (event: NotificationUpdatePayload) => void,
+  expectedTenantId?: string | null
 ): (() => void) => {
   if (!socket) return () => {};
   const handler = (payload: NotificationUpdatePayload) => {
+    const targetTenant = resolveExpectedTenantId(socket, expectedTenantId);
+    if (!isAuthorizedTenantEvent(payload, targetTenant)) {
+      return;
+    }
     callback(payload);
   };
   socket.on("notification.updated", handler);
@@ -251,10 +354,15 @@ export const subscribeNotificationUpdates = (
  */
 export const subscribePaymentUpdates = (
   socket: any,
-  callback: (event: PaymentUpdatePayload) => void
+  callback: (event: PaymentUpdatePayload) => void,
+  expectedTenantId?: string | null
 ): (() => void) => {
   if (!socket) return () => {};
   const handler = (payload: PaymentUpdatePayload) => {
+    const targetTenant = resolveExpectedTenantId(socket, expectedTenantId);
+    if (!isAuthorizedTenantEvent(payload, targetTenant)) {
+      return;
+    }
     callback(payload);
   };
   socket.on("payment.updated", handler);
@@ -355,7 +463,12 @@ const dispatcherService = {
   subscribeReconnectionRecovery,
   DEFAULT_SOCKET_RECONNECT_OPTIONS,
   DEFAULT_WEBSOCKET_AUTH_CONFIG,
+  DEFAULT_TENANT_FILTERING_CONFIG,
   getWebSocketAuthOptions,
+  isValidTenantId,
+  getTenantRoom,
+  resolveExpectedTenantId,
+  isAuthorizedTenantEvent,
 };
 
 

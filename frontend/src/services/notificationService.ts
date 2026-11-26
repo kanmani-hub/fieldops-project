@@ -2,6 +2,10 @@
 import { io, Socket } from "socket.io-client";
 import api from "./api";
 import { TechnicianNotification } from "../types/notifications";
+import {
+  isAuthorizedTenantEvent,
+  resolveExpectedTenantId,
+} from "./dispatcherService";
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL;
 
@@ -593,7 +597,8 @@ const DISPATCH_EVENT_CONFIG: Record<
 
 export const subscribeToDispatchEvents = (
   socket: Socket | null,
-  onDispatchEvent: (toast: any) => void
+  onDispatchEvent: (toast: any) => void,
+  expectedTenantId?: string | null
 ): (() => void) => {
   if (!socket) {
     return () => {};
@@ -607,6 +612,18 @@ export const subscribeToDispatchEvents = (
   Object.entries(DISPATCH_EVENT_CONFIG).forEach(
     ([event, config]) => {
       const handler = (payload: any = {}) => {
+        const targetTenant = resolveExpectedTenantId(
+          socket,
+          expectedTenantId
+        );
+        if (
+          payload?.tenant_id !== undefined ||
+          targetTenant !== null
+        ) {
+          if (!isAuthorizedTenantEvent(payload, targetTenant)) {
+            return;
+          }
+        }
         const jobTitle =
           payload.job_title ||
           payload.title ||

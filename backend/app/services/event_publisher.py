@@ -3,7 +3,20 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.services.websocket_tenant_filter import is_valid_tenant_id
+
 logger = logging.getLogger(__name__)
+
+
+def _has_valid_event_tenant(event_type: str, tenant_id: Optional[str]) -> bool:
+    """Validate that outbound domain events carry a non-wildcard tenant_id."""
+    if not is_valid_tenant_id(tenant_id):
+        logger.warning(
+            "Skipping publish of event=%s due to missing or invalid tenant_id.",
+            event_type,
+        )
+        return False
+    return True
 
 
 def generate_idempotency_key(
@@ -54,6 +67,9 @@ def publish_dispatch_event(
         logger.warning(
             "Redis client unavailable; skipping dispatch event publish."
         )
+        return
+
+    if not _has_valid_event_tenant(event_type, tenant_id):
         return
 
     if completed_at is not None:
@@ -148,6 +164,9 @@ def publish_invoice_event(
         )
         return
 
+    if not _has_valid_event_tenant(event_type, tenant_id):
+        return
+
     timestamp = (
         datetime.now(timezone.utc)
         .isoformat()
@@ -221,6 +240,9 @@ def publish_payment_event(
         logger.warning(
             "Redis client unavailable; skipping payment event publish."
         )
+        return
+
+    if not _has_valid_event_tenant(event_type, tenant_id):
         return
 
     timestamp = (
@@ -339,6 +361,9 @@ def publish_audit_event(
         )
         return
 
+    if not _has_valid_event_tenant(event_type, tenant_id):
+        return
+
     timestamp = (
         datetime.now(timezone.utc)
         .isoformat()
@@ -414,6 +439,9 @@ def publish_gps_event(
         logger.warning("Redis client unavailable; skipping GPS event publish.")
         return
 
+    if not _has_valid_event_tenant(event_type, tenant_id):
+        return
+
     idempotency_key = idempotency_key or generate_idempotency_key(
         domain="gps",
         tenant_id=tenant_id,
@@ -479,6 +507,9 @@ def publish_notification_event(
         logger.warning(
             "Redis client unavailable; skipping notification event publish."
         )
+        return
+
+    if not _has_valid_event_tenant(event_type, tenant_id):
         return
 
     timestamp = (
@@ -551,6 +582,9 @@ def publish_sla_event(
         logger.warning(
             "Redis client unavailable; skipping SLA event publish."
         )
+        return
+
+    if not _has_valid_event_tenant(event_type, tenant_id):
         return
 
     timestamp = (
@@ -648,6 +682,9 @@ def publish_analytics_event(
         logger.warning(
             "Redis client unavailable; skipping analytics event publish."
         )
+        return
+
+    if not _has_valid_event_tenant(event_type, tenant_id):
         return
 
     timestamp = (
@@ -865,6 +902,36 @@ from app.services.websocket_auth_service import (
     Validate_connection_authentication,
     get_connection_auth_status,
     get_connection_auth_config,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Tenant-Based Event Filtering Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_tenant_filter import (
+    DEFAULT_TENANT_FILTER_CONFIG,
+    TENANT_ROOM_PREFIX,
+    CANONICAL_TENANT_REQUIRED_EVENTS,
+    TenantEventFilterError,
+    InvalidTenantEventError,
+    CrossTenantEventError,
+    is_valid_tenant_id,
+    format_tenant_room,
+    format_tenant_scoped_room,
+    extract_tenant_from_room,
+    validate_event_tenant,
+    filter_tenant_events,
+    get_tenant_filter_config,
+    get_tenant_filter_status,
+    TenantEventFilterService,
+    AddTenantBasedEventFiltering,
+    Add_tenant_based_event_filtering,
+    FilterTenantEvents,
+    Filter_tenant_events,
+    validate_tenant_event_filter,
+    get_tenant_filtering_status,
+    get_tenant_filtering_config,
 )
 
 

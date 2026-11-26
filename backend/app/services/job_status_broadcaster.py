@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Union
 
 from app.redis_client import get_redis_client
+from app.services.websocket_tenant_filter import is_valid_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ class JobStatusUpdateBroadcaster:
         str_status = str(status or "").strip().upper()
         str_tenant = str(tenant_id or "").strip()
 
-        if not str_job_id or not str_status or not str_tenant:
+        if not str_job_id or not str_status or not is_valid_tenant_id(str_tenant):
             logger.warning(
                 "Invalid job status update parameters: job_id=%s, status=%s, tenant_id=%s",
                 str_job_id,
@@ -109,7 +110,7 @@ class JobStatusUpdateBroadcaster:
                 "job_id": str_job_id or "123",
                 "status": str_status or "ASSIGNED",
                 "status_code": "REJECTED",
-                "error": "job_id, status, and tenant_id are mandatory fields",
+                "error": "job_id, status, and valid tenant_id are mandatory fields",
             }
 
         client = redis_client if redis_client is not None else self.redis

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Union
 
 from app.redis_client import get_redis_client
+from app.services.websocket_tenant_filter import format_tenant_room, validate_event_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,7 @@ class KafkaToWebSocketBridge:
         else:
             return {"status": "FAILED", "error": "Invalid payload format; must be dict or JSON string"}
 
-        # 2. Extract and validate required metadata
+        # 2. Extract and validate required metadata & tenant boundary
         event_id = payload.get("event_id")
         tenant_id = payload.get("tenant_id")
         raw_event_type = payload.get("event_type") or payload.get("event")
@@ -160,6 +161,16 @@ class KafkaToWebSocketBridge:
                 "status": "REJECTED",
                 "error": "Missing required fields: event_id and tenant_id are mandatory",
             }
+
+        tenant_validation = validate_event_tenant(payload, require_tenant_id=True)
+        if not tenant_validation.get("allowed"):
+            return {
+                "status": "REJECTED",
+                "code": tenant_validation.get("code"),
+                "error": tenant_validation.get("error"),
+            }
+        tenant_id = tenant_validation["tenant_id"]
+        target_room = tenant_validation["room"] or format_tenant_room(tenant_id)
 
         # 3. Idempotency verification (prevent duplicate broadcasts on Kafka retry)
         client = redis_client if redis_client is not None else self.redis
@@ -202,6 +213,7 @@ class KafkaToWebSocketBridge:
             "event_id": str(event_id),
             "correlation_id": payload.get("correlation_id"),
             "tenant_id": str(tenant_id),
+            "room": target_room,
             "timestamp": timestamp,
             "schema_version": payload.get("schema_version", 1),
             "payload": payload.get("payload") or payload.get("data") or {},
@@ -238,6 +250,7 @@ class KafkaToWebSocketBridge:
             "event_name": ws_event_name,
             "event_id": str(event_id),
             "tenant_id": str(tenant_id),
+            "room": target_room,
             "delivered": True,
         }
 
