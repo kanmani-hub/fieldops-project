@@ -2410,6 +2410,71 @@ def post_websocket_reconnect_sync_endpoint(
     )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Handle WebSocket Failures Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/websocket/failures/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_failures_status_endpoint() -> dict:
+    """Return operational status for WebSocket failure handling and resilience."""
+    from app.services.websocket_failure_service import handle_websocket_failures
+    return handle_websocket_failures()
+
+
+@router.get(
+    "/websocket/failures/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_failures_config_endpoint() -> dict:
+    """Return configuration contract for WebSocket failure handling."""
+    from app.services.websocket_failure_service import get_websocket_failure_config
+    return get_websocket_failure_config()
+
+
+@router.post(
+    "/websocket/failures/report",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_websocket_failures_report_endpoint(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Report or simulate an isolated WebSocket failure condition without crashing."""
+    from app.services.websocket_failure_service import handle_websocket_failures
+
+    tenant_id = payload.get("tenant_id") or getattr(current_user, "tenant_id", "tenant-1")
+
+    return handle_websocket_failures(
+        status=payload.get("status", "DEGRADED_OR_RECOVERED"),
+        failure_handling=payload.get("failure_handling", "ENABLED"),
+        error_type=payload.get("error_type"),
+        raw_payload=payload.get("raw_payload"),
+        tenant_id=tenant_id,
+    )
+
+
+
 
 
 

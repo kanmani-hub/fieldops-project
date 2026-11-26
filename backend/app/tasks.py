@@ -4683,6 +4683,48 @@ HandleWebSocketReconnectionTask = handle_websocket_reconnection_task
 Handle_websocket_reconnection_task = handle_websocket_reconnection_task
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Handle WebSocket Failures Celery Task
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.handle_websocket_failures_task",
+)
+def handle_websocket_failures_task(
+    status: str = "DEGRADED_OR_RECOVERED",
+    failure_handling: str = "ENABLED",
+    error_type: Optional[str] = None,
+    raw_payload: Optional[Union[str, dict]] = None,
+    tenant_id: Optional[str] = None,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to evaluate and process WebSocket failure isolation and recovery."""
+    from app.services.websocket_failure_service import handle_websocket_failures
+    return handle_websocket_failures(
+        status=status,
+        failure_handling=failure_handling,
+        error_type=error_type,
+        raw_payload=raw_payload,
+        tenant_id=tenant_id,
+    )
+
+
+from app.services.websocket_failure_service import (
+    DEFAULT_FAILURE_HANDLING_CONFIG,
+    VALID_FAILURE_STATUSES,
+    handle_websocket_failures,
+    get_websocket_failure_config,
+    WebSocketFailureService,
+    HandleWebSocketFailures,
+    Handle_websocket_failures,
+    get_websocket_failure_status,
+)
+
+HandleWebSocketFailuresTask = handle_websocket_failures_task
+Handle_websocket_failures_task = handle_websocket_failures_task
+
+
+
 
 
 

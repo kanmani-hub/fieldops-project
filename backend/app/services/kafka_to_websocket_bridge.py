@@ -256,3 +256,15 @@ ConnectKafkaEventsToWebSocket = connect_kafka_events_to_websocket
 Connect_kafka_events_to_websocket = connect_kafka_events_to_websocket
 get_kafka_to_websocket_status = connect_kafka_events_to_websocket
 get_websocket_bridge_status = connect_kafka_events_to_websocket
+
+from app.services.websocket_failure_service import (
+    DEFAULT_FAILURE_HANDLING_CONFIG,
+    VALID_FAILURE_STATUSES,
+    handle_websocket_failures,
+    get_websocket_failure_config,
+    WebSocketFailureService,
+    HandleWebSocketFailures,
+    Handle_websocket_failures,
+    get_websocket_failure_status,
+)
+

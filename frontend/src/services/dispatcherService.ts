@@ -138,6 +138,15 @@ export interface ReconnectionConfig {
   tenant_id?: string;
 }
 
+export interface FailureHandlingConfig {
+  status: "DEGRADED_OR_RECOVERED" | "HEALTHY" | "DEGRADED" | "RECOVERED" | string;
+  failure_handling: "ENABLED" | string;
+  malformed_event_protection?: boolean;
+  max_redis_backoff_ms?: number;
+  circuit_breaker_enabled?: boolean;
+}
+
+
 export const DEFAULT_SOCKET_RECONNECT_OPTIONS = {
   reconnection: true,
   reconnectionAttempts: 10,
