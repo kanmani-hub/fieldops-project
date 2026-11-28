@@ -2627,6 +2627,65 @@ def post_websocket_tenant_filtering_validate_endpoint(
     )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Test Concurrent Connections Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/websocket/concurrency/status",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_concurrency_status_endpoint() -> dict:
+    """Return canonical status contract for Test concurrent connections."""
+    from app.services.websocket_reconnection_service import test_concurrent_connections
+    return test_concurrent_connections()
+
+
+@router.get(
+    "/websocket/concurrency/config",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def get_websocket_concurrency_config_endpoint() -> dict:
+    """Return operational configuration and bounds for concurrent WebSocket connections."""
+    from app.services.websocket_reconnection_service import get_concurrent_connections_config
+    return get_concurrent_connections_config()
+
+
+@router.post(
+    "/websocket/concurrency/run",
+    dependencies=[
+        Depends(
+            require_permission(
+                Permission.DISPATCH_QUEUE_VIEW
+            )
+        )
+    ],
+)
+def post_run_websocket_concurrency_endpoint(
+    payload: Optional[dict] = None,
+) -> dict:
+    """Execute bounded non-destructive simulation of concurrent WebSocket scenarios."""
+    from app.services.websocket_reconnection_service import run_concurrent_connections_simulation
+    body = payload or {}
+    return run_concurrent_connections_simulation(
+        clients_per_tenant=body.get("clients_per_tenant", 10),
+        tenant_count=body.get("tenant_count", 3),
+        events_per_tenant=body.get("events_per_tenant", 5),
+    )
+
+
 
 
 

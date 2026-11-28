@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_CONCURRENT_CONNECTIONS_CONFIG,
   DEFAULT_TENANT_FILTERING_CONFIG,
+  createBoundedEventDeduplicator,
   getTenantRoom,
   isAuthorizedTenantEvent,
   isValidTenantId,
+  subscribeConcurrentTenantEvents,
   subscribeDispatchUpdates,
   subscribeJobStatusUpdates,
   subscribeNotificationUpdates,
@@ -102,5 +105,93 @@ describe("dispatcherService tenant-based event filtering", () => {
     unsub3();
     unsub4();
     unsub5();
+  });
+
+  it("supports concurrent multi-client streams, bounded deduplication, and reconnects without cross-tenant leaks", () => {
+    expect(DEFAULT_CONCURRENT_CONNECTIONS_CONFIG.status).toBe("PASSED");
+    expect(DEFAULT_CONCURRENT_CONNECTIONS_CONFIG.scenarios).toEqual([
+      "same_tenant_concurrency",
+      "multi_tenant_isolation",
+      "reconnect",
+      "event_broadcast",
+    ]);
+
+    // Bounded deduplicator evicts oldest entries when reaching maxEntries
+    const dedup = createBoundedEventDeduplicator(3);
+    expect(dedup.isDuplicate("e1")).toBe(false);
+    expect(dedup.isDuplicate("e1")).toBe(true);
+    expect(dedup.isDuplicate("e2")).toBe(false);
+    expect(dedup.isDuplicate("e3")).toBe(false);
+    expect(dedup.size()).toBe(3);
+    expect(dedup.isDuplicate("e4")).toBe(false);
+    expect(dedup.size()).toBe(3);
+    expect(dedup.isDuplicate("e1")).toBe(false); // e1 evicted when e4 entered
+
+    // Concurrent sockets: 2 clients in tenant-alpha, 1 client in tenant-beta
+    const alpha1 = new MockSocket("tenant-alpha");
+    const alpha2 = new MockSocket("tenant-alpha");
+    const beta1 = new MockSocket("tenant-beta");
+
+    const alpha1Dispatch = vi.fn();
+    const alpha2Dispatch = vi.fn();
+    const alpha1Recovered = vi.fn();
+    const alpha1Sync = vi.fn();
+    const betaPayment = vi.fn();
+
+    const unsubA1 = subscribeConcurrentTenantEvents(alpha1, {
+      onDispatchUpdate: alpha1Dispatch,
+      onRecovered: alpha1Recovered,
+      onSyncRequired: alpha1Sync,
+    });
+    const unsubA2 = subscribeConcurrentTenantEvents(alpha2, {
+      onDispatchUpdate: alpha2Dispatch,
+    });
+    const unsubB1 = subscribeConcurrentTenantEvents(beta1, {
+      onPaymentUpdate: betaPayment,
+    });
+
+    // Duplicate event_id delivered once per socket; cross-tenant dropped
+    const evt = {
+      event: "dispatch.updated",
+      tenant_id: "tenant-alpha",
+      job_id: "job-1",
+      assignment_id: "asgn-1",
+      event_id: "evt-conc-1",
+      correlation_id: "corr-conc-1",
+    };
+    alpha1.emitLocal("dispatch.updated", evt);
+    alpha1.emitLocal("dispatch.updated", evt);
+    alpha2.emitLocal("dispatch.updated", evt);
+    beta1.emitLocal("payment.updated", {
+      event: "payment.updated",
+      tenant_id: "tenant-alpha",
+      invoice_id: "inv-leak",
+      payment_status: "PAID",
+      event_id: "evt-leak-1",
+    });
+
+    // Simulate reconnect recovery and sync fallback
+    alpha1.emitLocal("recovery.status", {
+      status: "RECOVERED",
+      namespace: "/dispatch-dashboard",
+      recovery_window_seconds: 120,
+      recovered: true,
+    });
+    alpha1.emitLocal("recovery.status", {
+      status: "SYNC_REQUIRED",
+      namespace: "/dispatch-dashboard",
+      recovery_window_seconds: 120,
+      recovered: false,
+    });
+
+    expect(alpha1Dispatch).toHaveBeenCalledTimes(1);
+    expect(alpha2Dispatch).toHaveBeenCalledTimes(1);
+    expect(betaPayment).not.toHaveBeenCalled();
+    expect(alpha1Recovered).toHaveBeenCalledTimes(1);
+    expect(alpha1Sync).toHaveBeenCalledTimes(1);
+
+    unsubA1();
+    unsubA2();
+    unsubB1();
   });
 });

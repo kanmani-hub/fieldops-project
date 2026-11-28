@@ -2570,6 +2570,24 @@ from app.services.websocket_tenant_filter import (
 )
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Test Concurrent Connections Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_reconnection_service import (
+    CONCURRENT_CONNECTION_SCENARIOS,
+    DEFAULT_CONCURRENT_CONNECTIONS_CONFIG,
+    ConcurrentConnectionsTester,
+    test_concurrent_connections,
+    run_concurrent_connections_simulation,
+    get_concurrent_connections_config,
+    TestConcurrentConnections,
+    Test_concurrent_connections,
+    get_concurrent_connections_status,
+    get_concurrent_connections_test_results,
+)
+
+
 
 
 

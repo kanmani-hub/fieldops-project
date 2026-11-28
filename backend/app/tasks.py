@@ -4820,6 +4820,47 @@ AddTenantBasedEventFilteringTask = filter_tenant_events_task
 Add_tenant_based_event_filtering_task = filter_tenant_events_task
 
 
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Test Concurrent Connections Celery Task
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.test_concurrent_connections_task",
+)
+def test_concurrent_connections_task(
+    run_simulation: bool = False,
+    clients_per_tenant: int = 10,
+    tenant_count: int = 3,
+    events_per_tenant: int = 5,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to run or verify concurrent WebSocket connections scenarios."""
+    from app.services.websocket_reconnection_service import test_concurrent_connections
+    return test_concurrent_connections(
+        run_simulation=run_simulation,
+        clients_per_tenant=clients_per_tenant,
+        tenant_count=tenant_count,
+        events_per_tenant=events_per_tenant,
+    )
+
+
+from app.services.websocket_reconnection_service import (
+    CONCURRENT_CONNECTION_SCENARIOS,
+    DEFAULT_CONCURRENT_CONNECTIONS_CONFIG,
+    ConcurrentConnectionsTester,
+    test_concurrent_connections,
+    run_concurrent_connections_simulation,
+    get_concurrent_connections_config,
+    TestConcurrentConnections,
+    Test_concurrent_connections,
+    get_concurrent_connections_status,
+    get_concurrent_connections_test_results,
+)
+
+TestConcurrentConnectionsTask = test_concurrent_connections_task
+Test_concurrent_connections_task = test_concurrent_connections_task
+
+
 
 
 

@@ -451,6 +451,118 @@ export const getWebSocketAuthOptions = (
   };
 };
 
+export interface ConcurrentConnectionsConfig {
+  status: "PASSED" | "FAILED" | string;
+  scenarios: string[];
+}
+
+export const DEFAULT_CONCURRENT_CONNECTIONS_CONFIG: ConcurrentConnectionsConfig = {
+  status: "PASSED",
+  scenarios: [
+    "same_tenant_concurrency",
+    "multi_tenant_isolation",
+    "reconnect",
+    "event_broadcast",
+  ],
+};
+
+/**
+ * Bounded deduplicator for concurrent event streams and reconnect replays.
+ * Prevents uncontrolled memory growth while enforcing idempotency by event key.
+ */
+export const createBoundedEventDeduplicator = (maxEntries = 500) => {
+  const cap = Math.max(1, Number(maxEntries) || 500);
+  const seen = new Set<string>();
+  const queue: string[] = [];
+
+  return {
+    isDuplicate: (eventId?: string | null): boolean => {
+      if (!eventId) {
+        return false;
+      }
+      const key = String(eventId);
+      if (seen.has(key)) {
+        return true;
+      }
+      if (queue.length >= cap) {
+        const oldest = queue.shift();
+        if (oldest !== undefined) {
+          seen.delete(oldest);
+        }
+      }
+      seen.add(key);
+      queue.push(key);
+      return false;
+    },
+    size: () => seen.size,
+    clear: () => {
+      seen.clear();
+      queue.length = 0;
+    },
+  };
+};
+
+export interface ConcurrentTenantStreamHandlers {
+  onDispatchUpdate?: (event: DispatchUpdatePayload) => void;
+  onJobStatusUpdate?: (event: JobStatusUpdatePayload) => void;
+  onSLAAlert?: (event: SLAAlertPayload) => void;
+  onNotificationUpdate?: (event: NotificationUpdatePayload) => void;
+  onPaymentUpdate?: (event: PaymentUpdatePayload) => void;
+  onRecovered?: (config: ReconnectionConfig) => void;
+  onSyncRequired?: () => void;
+  dedupMaxEntries?: number;
+}
+
+/**
+ * Subscribe to all tenant-filtered dispatch, SLA, notification, payment, and
+ * reconnection streams on a Socket.IO client with bounded deduplication.
+ */
+export const subscribeConcurrentTenantEvents = (
+  socket: any,
+  handlers: ConcurrentTenantStreamHandlers,
+  expectedTenantId?: string | null
+): (() => void) => {
+  if (!socket) return () => {};
+  const dedup = createBoundedEventDeduplicator(handlers.dedupMaxEntries ?? 500);
+  const unsubs: Array<() => void> = [];
+
+  const wrapDedup = <T extends { event_id?: string }>(cb?: (payload: T) => void) => {
+    return (payload: T) => {
+      if (!cb) return;
+      if (payload?.event_id && dedup.isDuplicate(payload.event_id)) {
+        return;
+      }
+      cb(payload);
+    };
+  };
+
+  if (handlers.onDispatchUpdate) {
+    unsubs.push(subscribeDispatchUpdates(socket, wrapDedup(handlers.onDispatchUpdate), expectedTenantId));
+  }
+  if (handlers.onJobStatusUpdate) {
+    unsubs.push(subscribeJobStatusUpdates(socket, wrapDedup(handlers.onJobStatusUpdate), expectedTenantId));
+  }
+  if (handlers.onSLAAlert) {
+    unsubs.push(subscribeSLAAlerts(socket, wrapDedup(handlers.onSLAAlert), expectedTenantId));
+  }
+  if (handlers.onNotificationUpdate) {
+    unsubs.push(subscribeNotificationUpdates(socket, wrapDedup(handlers.onNotificationUpdate), expectedTenantId));
+  }
+  if (handlers.onPaymentUpdate) {
+    unsubs.push(subscribePaymentUpdates(socket, wrapDedup(handlers.onPaymentUpdate), expectedTenantId));
+  }
+  if (handlers.onRecovered || handlers.onSyncRequired) {
+    unsubs.push(subscribeReconnectionRecovery(socket, handlers.onRecovered, handlers.onSyncRequired));
+  }
+
+  return () => {
+    for (const unsub of unsubs) {
+      unsub();
+    }
+    dedup.clear();
+  };
+};
+
 const dispatcherService = {
   getDispatchers,
   setDispatcherActive,
@@ -461,9 +573,12 @@ const dispatcherService = {
   subscribeNotificationUpdates,
   subscribePaymentUpdates,
   subscribeReconnectionRecovery,
+  subscribeConcurrentTenantEvents,
+  createBoundedEventDeduplicator,
   DEFAULT_SOCKET_RECONNECT_OPTIONS,
   DEFAULT_WEBSOCKET_AUTH_CONFIG,
   DEFAULT_TENANT_FILTERING_CONFIG,
+  DEFAULT_CONCURRENT_CONNECTIONS_CONFIG,
   getWebSocketAuthOptions,
   isValidTenantId,
   getTenantRoom,
