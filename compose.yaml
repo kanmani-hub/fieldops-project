@@ -332,6 +332,22 @@ services:
           --operation WRITE \
           --operation DESCRIBE \
           --topic "fieldops.notification.events"
+        # Allow the producer to publish billing events.
+        /opt/kafka/bin/kafka-acls.sh \
+          --bootstrap-server kafka:9092 \
+          --add \
+          --allow-principal "User:$$KAFKA_PRODUCER_USERNAME" \
+          --operation WRITE \
+          --operation DESCRIBE \
+          --topic "fieldops.billing.events"
+        # Allow the producer to publish payment events.
+        /opt/kafka/bin/kafka-acls.sh \
+          --bootstrap-server kafka:9092 \
+          --add \
+          --allow-principal "User:$$KAFKA_PRODUCER_USERNAME" \
+          --operation WRITE \
+          --operation DESCRIBE \
+          --topic "fieldops.payment.events"
         # Allow notification consumer to read lifecycle events.
         /opt/kafka/bin/kafka-acls.sh \
           --bootstrap-server kafka:9092 \
@@ -349,5 +365,27 @@ services:
           --operation DESCRIBE \
           --group "$$KAFKA_NOTIFICATIONS_CONSUMER_GROUP"
 
+  redis:
+    image: redis:7-alpine
+    container_name: fieldops-redis
+    command: >
+      redis-server
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --appendonly yes
+      --appendfsync everysec
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
   kafka_data:
+  redis_data:

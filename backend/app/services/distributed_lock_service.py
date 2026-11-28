@@ -1,10 +1,26 @@
-﻿import os
+import os
 import time
 import secrets
 import logging
 from contextlib import contextmanager
+from typing import Optional, Any, Dict, Tuple
 from fastapi import HTTPException
-from app.redis_client import get_redis_client
+from app.redis_client import (
+    get_redis_client,
+    DEFAULT_DISTRIBUTED_LOCK_CONFIG,
+    acquire_distributed_lock,
+    release_distributed_lock,
+    extend_distributed_lock,
+    is_lock_held,
+    with_distributed_lock as redis_with_distributed_lock,
+    improve_distributed_locks,
+    get_distributed_lock_config,
+    ImproveDistributedLocks,
+    Improve_distributed_locks,
+    get_lock_strategy,
+    get_distributed_lock_status,
+    LockAcquisitionError,
+)
 
 try:
     from redlock import Redlock
@@ -30,6 +46,103 @@ def get_redlock_manager():
     return Redlock(nodes)
 
 dlm = get_redlock_manager()
+
+
+class DistributedLockService:
+    """Service wrapper for hardened tokenized TTL distributed locking."""
+
+    def __init__(self, redis_client=None):
+        self._redis = redis_client
+
+    @property
+    def redis(self):
+        if self._redis is None:
+            self._redis = get_redis_client()
+        return self._redis
+
+    def get_status(self) -> dict:
+        return improve_distributed_locks()
+
+    def get_config(self) -> dict:
+        return get_distributed_lock_config()
+
+    def acquire(
+        self,
+        resource: str,
+        ttl_seconds: int = 30,
+        tenant_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+    ) -> tuple[bool, Optional[str]]:
+        return acquire_distributed_lock(
+            resource=resource,
+            ttl_seconds=ttl_seconds,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+            redis_client=self.redis,
+        )
+
+    def release(
+        self,
+        resource: str,
+        lock_token: str,
+        tenant_id: Optional[str] = None,
+    ) -> bool:
+        return release_distributed_lock(
+            resource=resource,
+            lock_token=lock_token,
+            tenant_id=tenant_id,
+            redis_client=self.redis,
+        )
+
+    def extend(
+        self,
+        resource: str,
+        lock_token: str,
+        additional_ttl_seconds: int = 30,
+        tenant_id: Optional[str] = None,
+    ) -> bool:
+        return extend_distributed_lock(
+            resource=resource,
+            lock_token=lock_token,
+            additional_ttl_seconds=additional_ttl_seconds,
+            tenant_id=tenant_id,
+            redis_client=self.redis,
+        )
+
+    def is_held(self, resource: str, tenant_id: Optional[str] = None) -> bool:
+        return is_lock_held(resource=resource, tenant_id=tenant_id, redis_client=self.redis)
+
+
+distributed_lock_service = DistributedLockService()
+
+
+@contextmanager
+def with_distributed_lock(
+    resource: str,
+    ttl_seconds: int = 30,
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    redis_client=None,
+):
+    """General distributed lock context manager raising HTTPException(409) on contention."""
+    try:
+        with redis_with_distributed_lock(
+            resource=resource,
+            ttl_seconds=ttl_seconds,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+            redis_client=redis_client,
+        ) as token:
+            yield token
+    except LockAcquisitionError as err:
+        rc = redis_client or get_redis_client()
+        if rc:
+            try:
+                rc.incr("metrics:lock_contention")
+            except Exception:
+                pass
+        raise HTTPException(status_code=409, detail=f"Concurrent modification detected: {err}")
+
 
 @contextmanager
 def with_job_lock(job_id: str):

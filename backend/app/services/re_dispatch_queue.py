@@ -185,3 +185,58 @@ class ReDispatchQueueService:
             "attempt_count": new_attempt_count,
             "queue_score": score,
         }
+
+    @classmethod
+    def acquire_job_lock(
+        cls,
+        job_id: str,
+        tenant_id: str | None = None,
+        ttl_seconds: int = 15,
+        redis_client=None,
+    ) -> tuple[bool, str | None]:
+        """Acquire a tokenized distributed lock before modifying or requeuing a job."""
+        from app.redis_client import acquire_distributed_lock
+        return acquire_distributed_lock(
+            resource=f"job:{job_id}",
+            ttl_seconds=ttl_seconds,
+            tenant_id=tenant_id,
+            redis_client=redis_client,
+        )
+
+    @classmethod
+    def release_job_lock(
+        cls,
+        job_id: str,
+        lock_token: str,
+        tenant_id: str | None = None,
+        redis_client=None,
+    ) -> bool:
+        """Safely release the job lock using the process's unique token."""
+        from app.redis_client import release_distributed_lock
+        return release_distributed_lock(
+            resource=f"job:{job_id}",
+            lock_token=lock_token,
+            tenant_id=tenant_id,
+            redis_client=redis_client,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Distributed Lock Re-exports (Story: Improve distributed locks)
+# ---------------------------------------------------------------------------
+
+from app.redis_client import (
+    DEFAULT_DISTRIBUTED_LOCK_CONFIG,
+    acquire_distributed_lock,
+    release_distributed_lock,
+    extend_distributed_lock,
+    is_lock_held,
+    with_distributed_lock,
+    improve_distributed_locks,
+    get_distributed_lock_config,
+    ImproveDistributedLocks,
+    Improve_distributed_locks,
+    get_lock_strategy,
+    get_distributed_lock_status,
+)
+

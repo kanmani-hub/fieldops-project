@@ -15,6 +15,12 @@ from ..models.user import User
 from ..auth.jwt_handler import verify_access_token
 from ..auth.session_service import validate_session, touch_session
 from ..auth.rbac import UserRole, Permission, has_permission
+from .websocket_tenant_filter import (
+    extract_tenant_from_room,
+    format_tenant_room,
+    is_valid_tenant_id,
+    validate_event_tenant,
+)
 
 
 # ============================================================
@@ -365,6 +371,8 @@ async def connect(sid, environ, auth=None):
     # Independent customers must never join an organization broadcast room.
     if tenant_id is not None:
         await sio.enter_room(sid, f"tenant_{tenant_id}")
+        if is_valid_tenant_id(tenant_id):
+            await sio.enter_room(sid, format_tenant_room(tenant_id))
 
     # Authenticated user room.
     await sio.enter_room(sid, f"user_{user_id}")
@@ -616,35 +624,82 @@ class WebSocketManager:
         tenant_id: str,
         payload: dict,
     ):
-        room = f"tenant_{tenant_id}"
+        if not is_valid_tenant_id(tenant_id):
+            logger.warning("Rejected broadcast_to_tenant with invalid tenant_id=%s", tenant_id)
+            return False
+
+        norm_tenant = str(tenant_id).strip()
+        if isinstance(payload, dict):
+            validation = validate_event_tenant(
+                payload,
+                expected_tenant_id=norm_tenant,
+                require_tenant_id=False,
+            )
+            if not validation.get("allowed"):
+                logger.warning(
+                    "Blocked cross-tenant or invalid payload in broadcast_to_tenant target=%s code=%s",
+                    norm_tenant,
+                    validation.get("code"),
+                )
+                return False
+            outbound_payload = dict(payload)
+            if not outbound_payload.get("tenant_id"):
+                outbound_payload["tenant_id"] = norm_tenant
+        else:
+            return False
+
+        room = f"tenant_{norm_tenant}"
 
         try:
-            event_name = payload.get(
+            event_name = outbound_payload.get(
                 "type",
-                "dispatch_event",
+                outbound_payload.get("event", "dispatch_event"),
             )
 
             await sio.emit(
                 event_name,
-                payload,
+                outbound_payload,
                 room=room,
             )
 
             logger.info(
                 "Broadcast tenant event: tenant_id=%s event=%s",
-                tenant_id,
+                norm_tenant,
                 event_name,
             )
+            return True
 
         except Exception:
             logger.exception(
                 "Failed to broadcast to tenant %s",
-                tenant_id,
+                norm_tenant,
             )
+            return False
 
     async def broadcast(self, channel: str, payload: dict):
+        if not isinstance(payload, dict):
+            return False
+
+        room_tenant = extract_tenant_from_room(channel)
+        if room_tenant is not None:
+            validation = validate_event_tenant(
+                payload,
+                expected_tenant_id=room_tenant,
+                require_tenant_id=True,
+            )
+            if not validation.get("allowed"):
+                logger.warning(
+                    "Blocked outbound broadcast on room=%s code=%s",
+                    channel,
+                    validation.get("code"),
+                )
+                return False
+        elif payload.get("tenant_id") is not None and not is_valid_tenant_id(payload.get("tenant_id")):
+            logger.warning("Blocked outbound broadcast with invalid tenant_id on room=%s", channel)
+            return False
+
         try:
-            event_name = payload.get("type", "update")
+            event_name = payload.get("type", payload.get("event", "update"))
 
             await sio.emit(
                 event_name,
@@ -657,12 +712,14 @@ class WebSocketManager:
                 event_name,
                 channel,
             )
+            return True
 
         except Exception:
             logger.exception(
                 "Failed to broadcast to room %s",
                 channel,
             )
+            return False
 
 
 ws_manager = WebSocketManager()

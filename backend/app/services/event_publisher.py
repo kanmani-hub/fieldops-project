@@ -3,7 +3,20 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.services.websocket_tenant_filter import is_valid_tenant_id
+
 logger = logging.getLogger(__name__)
+
+
+def _has_valid_event_tenant(event_type: str, tenant_id: Optional[str]) -> bool:
+    """Validate that outbound domain events carry a non-wildcard tenant_id."""
+    if not is_valid_tenant_id(tenant_id):
+        logger.warning(
+            "Skipping publish of event=%s due to missing or invalid tenant_id.",
+            event_type,
+        )
+        return False
+    return True
 
 
 def generate_idempotency_key(
@@ -56,6 +69,9 @@ def publish_dispatch_event(
         )
         return
 
+    if not _has_valid_event_tenant(event_type, tenant_id):
+        return
+
     if completed_at is not None:
         if completed_at.tzinfo is None:
             raise ValueError("completed_at must be timezone-aware")
@@ -92,6 +108,7 @@ def publish_dispatch_event(
         "idempotency_key": idempotency_key,
         "schema_version": schema_version,
         "job_id": str(job_id),
+        "status": new_status,
         "old_status": old_status,
         "new_status": new_status,
         "timestamp": timestamp,
@@ -145,6 +162,9 @@ def publish_invoice_event(
         logger.warning(
             "Redis client unavailable; skipping invoice event publish."
         )
+        return
+
+    if not _has_valid_event_tenant(event_type, tenant_id):
         return
 
     timestamp = (
@@ -222,6 +242,9 @@ def publish_payment_event(
         )
         return
 
+    if not _has_valid_event_tenant(event_type, tenant_id):
+        return
+
     timestamp = (
         datetime.now(timezone.utc)
         .isoformat()
@@ -272,6 +295,50 @@ def publish_payment_event(
             e,
         )
 
+    # Trigger canonical payment update broadcast for WebSocket real-time consumers
+    try:
+        from app.services.payment_update_broadcaster import send_payment_updates
+        norm_st = "PAID" if "success" in event_type.lower() or "paid" in event_type.lower() or "completed" in event_type.lower() else (
+            "REFUNDED" if "refund" in event_type.lower() else (
+                "FAILED" if "fail" in event_type.lower() or "decline" in event_type.lower() else (
+                    "PENDING" if "init" in event_type.lower() or "pending" in event_type.lower() else "PAID"
+                )
+            )
+        )
+        inv_id = str(job_id)
+        amt = None
+        curr = "USD"
+        p_method = None
+        err_msg = None
+        if payload and isinstance(payload, dict):
+            if payload.get("status") or payload.get("payment_status"):
+                norm_st = str(payload.get("status") or payload.get("payment_status")).upper()
+            if payload.get("invoice_id"):
+                inv_id = str(payload.get("invoice_id"))
+            amt = payload.get("amount")
+            curr = payload.get("currency", "USD")
+            p_method = payload.get("payment_method")
+            err_msg = payload.get("error_reason") or payload.get("error_message") or payload.get("error")
+
+        send_payment_updates(
+            invoice_id=inv_id,
+            payment_status=norm_st,
+            tenant_id=tenant_id,
+            payment_id=payment_id,
+            job_id=job_id,
+            amount=amt,
+            currency=curr,
+            payment_method=p_method,
+            error_reason=err_msg,
+            correlation_id=correlation_id,
+            event_id=event_id,
+            timestamp=timestamp,
+            redis_client=redis_client,
+        )
+    except Exception as pub_notify_err:
+        logger.warning("Failed secondary broadcast of payment update: %s", pub_notify_err)
+
+
 
 def publish_audit_event(
     redis_client,
@@ -292,6 +359,9 @@ def publish_audit_event(
         logger.warning(
             "Redis client unavailable; skipping audit event publish."
         )
+        return
+
+    if not _has_valid_event_tenant(event_type, tenant_id):
         return
 
     timestamp = (
@@ -369,6 +439,9 @@ def publish_gps_event(
         logger.warning("Redis client unavailable; skipping GPS event publish.")
         return
 
+    if not _has_valid_event_tenant(event_type, tenant_id):
+        return
+
     idempotency_key = idempotency_key or generate_idempotency_key(
         domain="gps",
         tenant_id=tenant_id,
@@ -434,6 +507,9 @@ def publish_notification_event(
         logger.warning(
             "Redis client unavailable; skipping notification event publish."
         )
+        return
+
+    if not _has_valid_event_tenant(event_type, tenant_id):
         return
 
     timestamp = (
@@ -508,6 +584,9 @@ def publish_sla_event(
         )
         return
 
+    if not _has_valid_event_tenant(event_type, tenant_id):
+        return
+
     timestamp = (
         datetime.now(timezone.utc)
         .isoformat()
@@ -554,6 +633,36 @@ def publish_sla_event(
             e,
         )
 
+    # Trigger canonical SLA alert broadcast for WebSocket real-time consumers
+    try:
+        sev = "BREACHED" if "breach" in event_type.lower() and "warning" not in event_type.lower() and "near" not in event_type.lower() else "AT_RISK"
+        if payload and isinstance(payload, dict) and payload.get("severity"):
+            sev = str(payload.get("severity")).upper()
+        
+        rem_sec = None
+        target_t = None
+        c_tier = "STANDARD"
+        if payload and isinstance(payload, dict):
+            rem_sec = payload.get("remaining_seconds") or payload.get("time_remaining_seconds")
+            target_t = payload.get("sla_deadline") or payload.get("target_time") or payload.get("deadline")
+            c_tier = payload.get("customer_tier", "STANDARD")
+
+        send_sla_alerts(
+            job_id=job_id,
+            severity=sev,
+            tenant_id=tenant_id,
+            time_remaining_seconds=rem_sec,
+            target_time=target_t,
+            customer_tier=c_tier,
+            correlation_id=correlation_id,
+            event_id=event_id,
+            timestamp=timestamp,
+            redis_client=redis_client,
+        )
+    except Exception as alert_err:
+        logger.warning("Failed secondary broadcast of SLA alert: %s", alert_err)
+
+
 
 def publish_analytics_event(
     redis_client,
@@ -573,6 +682,9 @@ def publish_analytics_event(
         logger.warning(
             "Redis client unavailable; skipping analytics event publish."
         )
+        return
+
+    if not _has_valid_event_tenant(event_type, tenant_id):
         return
 
     timestamp = (
@@ -622,3 +734,229 @@ def publish_analytics_event(
             "Failed to publish analytics event to Redis: %s",
             e,
         )
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Connect Kafka Events to WebSocket Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.kafka_to_websocket_bridge import (
+    DEFAULT_KAFKA_TO_WEBSOCKET_CONFIG,
+    KAFKA_TO_WEBSOCKET_EVENT_MAP,
+    map_kafka_event_to_websocket,
+    connect_kafka_events_to_websocket,
+    get_kafka_to_websocket_config,
+    KafkaToWebSocketBridge,
+    bridge_kafka_event_to_websocket,
+    ConnectKafkaEventsToWebSocket,
+    Connect_kafka_events_to_websocket,
+    get_kafka_to_websocket_status,
+    get_websocket_bridge_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Job Status Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.job_status_broadcaster import (
+    DEFAULT_JOB_STATUS_UPDATE_CONFIG,
+    send_job_status_updates,
+    get_job_status_update_config,
+    JobStatusUpdateBroadcaster,
+    SendJobStatusUpdates,
+    Send_job_status_updates,
+    broadcast_job_status_update,
+    get_job_status_update_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Technician Location Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.technician_location_broadcaster import (
+    DEFAULT_TECHNICIAN_LOCATION_CONFIG,
+    send_technician_location_updates,
+    get_technician_location_config,
+    TechnicianLocationBroadcaster,
+    SendTechnicianLocationUpdates,
+    Send_technician_location_updates,
+    broadcast_technician_location_update,
+    get_technician_location_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Dispatch Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.dispatch_update_broadcaster import (
+    DEFAULT_DISPATCH_UPDATE_CONFIG,
+    send_dispatch_updates,
+    get_dispatch_update_config,
+    DispatchUpdateBroadcaster,
+    SendDispatchUpdates,
+    Send_dispatch_updates,
+    broadcast_dispatch_update,
+    get_dispatch_update_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send SLA Alerts Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.sla_alert_broadcaster import (
+    DEFAULT_SLA_ALERT_CONFIG,
+    VALID_SEVERITIES,
+    send_sla_alerts,
+    get_sla_alert_config,
+    SLAAlertBroadcaster,
+    SendSLAAlerts,
+    Send_sla_alerts,
+    broadcast_sla_alert,
+    get_sla_alert_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Notification Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.notification_update_broadcaster import (
+    DEFAULT_NOTIFICATION_UPDATE_CONFIG,
+    VALID_NOTIFICATION_STATUSES,
+    send_notification_updates,
+    get_notification_update_config,
+    NotificationUpdateBroadcaster,
+    SendNotificationUpdates,
+    Send_notification_updates,
+    broadcast_notification_update,
+    get_notification_update_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Payment Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.payment_update_broadcaster import (
+    DEFAULT_PAYMENT_UPDATE_CONFIG,
+    VALID_PAYMENT_STATUSES,
+    send_payment_updates,
+    get_payment_update_config,
+    PaymentUpdateBroadcaster,
+    SendPaymentUpdates,
+    Send_payment_updates,
+    broadcast_payment_update,
+    get_payment_update_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Handle Reconnection Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_reconnection_service import (
+    DEFAULT_RECONNECTION_CONFIG,
+    RECOVERY_WINDOW_SECONDS,
+    handle_websocket_reconnection,
+    get_reconnection_config,
+    get_reconnection_status,
+    WebSocketReconnectionService,
+    HandleWebSocketReconnection,
+    Handle_websocket_reconnection,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Handle WebSocket Failures Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_failure_service import (
+    DEFAULT_FAILURE_HANDLING_CONFIG,
+    VALID_FAILURE_STATUSES,
+    handle_websocket_failures,
+    get_websocket_failure_config,
+    WebSocketFailureService,
+    HandleWebSocketFailures,
+    Handle_websocket_failures,
+    get_websocket_failure_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Connection Authentication Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_auth_service import (
+    DEFAULT_WEBSOCKET_AUTH_CONFIG,
+    validate_connection_authentication,
+    get_websocket_auth_config,
+    get_websocket_auth_status,
+    WebSocketAuthService,
+    AddConnectionAuthentication,
+    Add_connection_authentication,
+    ValidateConnectionAuthentication,
+    Validate_connection_authentication,
+    get_connection_auth_status,
+    get_connection_auth_config,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Tenant-Based Event Filtering Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_tenant_filter import (
+    DEFAULT_TENANT_FILTER_CONFIG,
+    TENANT_ROOM_PREFIX,
+    CANONICAL_TENANT_REQUIRED_EVENTS,
+    TenantEventFilterError,
+    InvalidTenantEventError,
+    CrossTenantEventError,
+    is_valid_tenant_id,
+    format_tenant_room,
+    format_tenant_scoped_room,
+    extract_tenant_from_room,
+    validate_event_tenant,
+    filter_tenant_events,
+    get_tenant_filter_config,
+    get_tenant_filter_status,
+    TenantEventFilterService,
+    AddTenantBasedEventFiltering,
+    Add_tenant_based_event_filtering,
+    FilterTenantEvents,
+    Filter_tenant_events,
+    validate_tenant_event_filter,
+    get_tenant_filtering_status,
+    get_tenant_filtering_config,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Test Concurrent Connections Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_reconnection_service import (
+    CONCURRENT_CONNECTION_SCENARIOS,
+    DEFAULT_CONCURRENT_CONNECTIONS_CONFIG,
+    ConcurrentConnectionsTester,
+    test_concurrent_connections,
+    run_concurrent_connections_simulation,
+    get_concurrent_connections_config,
+    TestConcurrentConnections,
+    Test_concurrent_connections,
+    get_concurrent_connections_status,
+    get_concurrent_connections_test_results,
+)
+
+
+
+
+
+
+
+
+

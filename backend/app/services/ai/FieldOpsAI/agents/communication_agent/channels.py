@@ -183,6 +183,25 @@ def mark_delivery(
     )
     db.commit()
 
+    # Broadcast notification lifecycle update over WebSocket
+    try:
+        from app.services.notification_update_broadcaster import send_notification_updates
+        delivery = db.query(NotificationChannelDelivery).filter(NotificationChannelDelivery.id == delivery_id).first()
+        if delivery:
+            send_notification_updates(
+                notification_id=str(delivery.notification_id),
+                status=status,
+                tenant_id=str(delivery.tenant_id),
+                channel=delivery.channel,
+                recipient_id=delivery.recipient_id,
+                attempt=delivery.attempts,
+                error_reason=error,
+                provider_id=provider_id,
+            )
+    except Exception as notify_err:
+        logger.warning("Failed to broadcast real-time notification update for delivery %s: %s", delivery_id, notify_err)
+
+
 
 def begin_delivery_attempt(db: Session, delivery_id: int) -> bool:
     """Atomically claim one queued delivery; duplicate tasks cannot send it."""

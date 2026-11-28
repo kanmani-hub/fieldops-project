@@ -1449,6 +1449,24 @@ async def gps_ping(
                 update_payload,
             )
 
+            try:
+                from app.services.technician_location_broadcaster import send_technician_location_updates
+                send_technician_location_updates(
+                    technician_id=str(payload.technician_id),
+                    latitude=float(payload.latitude),
+                    longitude=float(payload.longitude),
+                    tenant_id=str(tracking_tenant_id),
+                    job_id=str(payload.job_id) if payload.job_id else None,
+                    accuracy=payload.accuracy,
+                    altitude=payload.altitude,
+                    timestamp=iso_utc(payload.timestamp) if hasattr(payload.timestamp, "isoformat") else str(payload.timestamp),
+                    correlation_id=correlation_id,
+                    redis_client=redis_client,
+                )
+            except Exception as ws_err:
+                logger.warning("Failed to broadcast technician location update: %s", ws_err, extra=log_extra)
+
+
         except Exception as exc:
             logger.warning(
                 (

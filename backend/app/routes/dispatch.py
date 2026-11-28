@@ -1226,6 +1226,22 @@ async def admin_override_assignment(
 
         )
 
+    try:
+        from app.services.dispatch_update_broadcaster import send_dispatch_updates
+        send_dispatch_updates(
+            job_id=str(job.id),
+            assignment_id=str(override_log.id),
+            tenant_id=str(effective_tenant_id),
+            technician_id=str(tech.technician_id),
+            technician_name=tech.technician_name,
+            previous_technician_id=str(prev_id) if prev_id else None,
+            dispatch_action="OVERRIDE",
+            status=job.status,
+            correlation_id=correlation_id,
+        )
+    except Exception as disp_err:
+        logger.warning("Failed to broadcast dispatch update: %s", disp_err, extra=log_extra)
+
     from app.services.assignment_push import send_assignment_push
 
     await send_assignment_push(

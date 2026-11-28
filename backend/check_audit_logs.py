@@ -1,11 +1,23 @@
 import sys
 import datetime
+from sqlalchemy import text
 from app.database import SessionLocal
 from app.models import Job, Organization, Technician, JobClosure, User
 from app.models.enterprise_audit import EnterpriseAuditLog
 
+def get_db():
+    """Attempt database connection with graceful error handling."""
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        return db
+    except Exception:
+        print("\n⚠️  Unable to connect to PostgreSQL database.")
+        print("👉 Please ensure your PostgreSQL service or Docker container is running.\n")
+        return None
+
 def format_dt(dt):
-    """Format datetime in local timezone as YYYY-MM-DD HH:MM:SS."""
+    """Format datetime in local timezone as YYYY-MM-DD HH:MM."""
     if not dt:
         return "-"
     try:
@@ -30,7 +42,6 @@ def format_dt_full(dt):
 
 def get_job_lifecycle_data(db, job):
     """Collect all lifecycle timestamps, technician info, and closure costs for a job."""
-    # Technician Name and ID
     tech = None
     if job.assigned_technician_id:
         tech = db.query(Technician).filter(Technician.technician_id == job.assigned_technician_id).first()
@@ -42,23 +53,18 @@ def get_job_lifecycle_data(db, job):
     else:
         tech_display = "Unassigned"
 
-    # Audit logs for transitions
     logs = db.query(EnterpriseAuditLog).filter(
         EnterpriseAuditLog.entity_type == "job",
         EnterpriseAuditLog.entity_id == str(job.id)
     ).order_by(EnterpriseAuditLog.timestamp.asc()).all()
 
-    # Job closure for costs and completion
     closure = db.query(JobClosure).filter(JobClosure.job_id == job.id).first()
 
-    # Determine timestamps
     created_at = job.created_at
     assigned_at = job.assigned_at
     
-    # Accepted timestamp (from audit logs)
     accepted_at = next((l.timestamp for l in logs if "ACCEPTED" in (l.action or "").upper()), None)
     
-    # In Progress timestamp (work_started_at, on_site_at, en_route_at or audit logs)
     in_progress_at = (
         job.work_started_at 
         or job.on_site_at 
@@ -66,12 +72,10 @@ def get_job_lifecycle_data(db, job):
         or next((l.timestamp for l in logs if "STARTED" in (l.action or "").upper() or (l.new_value and ("IN_PROGRESS" in str(l.new_value) or "ON_SITE" in str(l.new_value) or "EN_ROUTE" in str(l.new_value)))), None)
     )
 
-    # Completed timestamp
     completed_at = job.completed_at or (closure.completed_at if closure else None)
     if not completed_at:
         completed_at = next((l.timestamp for l in logs if "COMPLETED" in (l.action or "").upper()), None)
 
-    # Costs & GST (5%)
     amount_str = "-"
     subtotal = None
     gst_amount = None
@@ -100,8 +104,28 @@ def get_job_lifecycle_data(db, job):
         "logs": logs
     }
 
+def print_command_suggestions():
+    """Print standard suggestions footer in clean English."""
+    print("💡 COMMAND SUGGESTIONS:")
+    print("   • View specific job audit log:   python check_audit_logs.py <job_id>  (e.g. python check_audit_logs.py 40)")
+    print("   • View force / manual assigns:   python check_audit_logs.py force")
+    print("   • View full lifecycle timeline:  python check_audit_logs.py full")
+    print("   • View real-time Kafka events:   python check_kafka_events.py\n")
+
+def show_help():
+    """Display CLI help guide."""
+    print(f"\n{'='*30} FIELDOPS AUDIT LOGS INSPECTOR {'='*30}")
+    print("Available Commands:")
+    print("  python check_audit_logs.py             List recent 15 jobs with status and technician names")
+    print("  python check_audit_logs.py <job_id>    View complete lifecycle timeline & audit events for a job")
+    print("  python check_audit_logs.py force       List all jobs assigned manually or via admin force-assign")
+    print("  python check_audit_logs.py full        Display expanded lifecycle progression for recent jobs")
+    print("  python check_audit_logs.py help        Show this help message\n")
+
 def show_recent_jobs(limit=15):
-    db = SessionLocal()
+    db = get_db()
+    if not db:
+        return
     try:
         jobs = db.query(Job).order_by(Job.id.desc()).limit(limit).all()
         print(f"\n{'='*45} RECENT {len(jobs)} JOBS {'='*45}")
@@ -115,14 +139,14 @@ def show_recent_jobs(limit=15):
             print(f"#{j.id:<6} | {j.status:<11} | {j.service_type[:15]:<16} | {j.customer_name[:15]:<16} | {data['tech_display'][:23]:<24} | {c_time:<16} | {comp_time:<16} | {data['amount_str']:<11}")
         print("-" * len(header))
         print()
-        print("💡 Specific job details & timeline: python check_audit_logs.py <job_id>  (e.g. python check_audit_logs.py 40)")
-        print("💡 Force / Manual assigned jobs:    python check_audit_logs.py force")
-        print("💡 Recent jobs with full timeline:  python check_audit_logs.py full\n")
+        print_command_suggestions()
     finally:
         db.close()
 
 def show_force_assigned_jobs():
-    db = SessionLocal()
+    db = get_db()
+    if not db:
+        return
     try:
         jobs = db.query(Job).filter(Job.assigned_by.isnot(None)).order_by(Job.id.desc()).all()
         print(f"\n{'='*30} FORCE / MANUALLY ASSIGNED JOBS ({len(jobs)}) {'='*30}")
@@ -148,11 +172,14 @@ def show_force_assigned_jobs():
             print(f"#{j.id:<6} | {j.status:<11} | {user_label[:29]:<30} | {tech_display[:25]:<26} | {assigned_at}")
         print("-" * len(header))
         print()
+        print_command_suggestions()
     finally:
         db.close()
 
 def show_job_logs(job_id):
-    db = SessionLocal()
+    db = get_db()
+    if not db:
+        return
     try:
         job = db.query(Job).filter(Job.id == int(job_id)).first()
         if not job:
@@ -210,12 +237,15 @@ def show_job_logs(job_id):
                 if l.new_value:
                     print(f"   -> Details: {l.new_value}")
         print("=" * 78 + "\n")
+        print_command_suggestions()
     finally:
         db.close()
 
 def show_full_recent_jobs(limit=15):
     """Show detailed lifecycle card for each recent job."""
-    db = SessionLocal()
+    db = get_db()
+    if not db:
+        return
     try:
         jobs = db.query(Job).order_by(Job.id.desc()).limit(limit).all()
         print(f"\n{'='*28} RECENT {len(jobs)} JOBS - FULL LIFECYCLE {'='*28}")
@@ -230,13 +260,16 @@ def show_full_recent_jobs(limit=15):
             else:
                 print(f"Total Bill:  -")
         print("\n" + "=" * 78 + "\n")
+        print_command_suggestions()
     finally:
         db.close()
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         arg = sys.argv[1].lower()
-        if arg in ("force", "overrides", "--force", "manual"):
+        if arg in ("help", "-h", "--help"):
+            show_help()
+        elif arg in ("force", "overrides", "--force", "manual"):
             show_force_assigned_jobs()
         elif arg in ("full", "all", "--full", "lifecycle"):
             show_full_recent_jobs()

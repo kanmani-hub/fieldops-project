@@ -23,6 +23,24 @@ celery_app = Celery(
     backend=redis_url,
 )
 
+# Bounded Redis broker connection retry & failure handling settings
+celery_app.conf.update(
+    broker_connection_retry_on_startup=True,
+    broker_connection_max_retries=5,
+    broker_transport_options={
+        "visibility_timeout": 3600,
+        "socket_timeout": 5.0,
+        "socket_connect_timeout": 5.0,
+        "max_retries": 3,
+        "interval_start": 0,
+        "interval_step": 0.2,
+        "interval_max": 0.5,
+    },
+    result_backend_transport_options={
+        "retry_on_timeout": True,
+    },
+)
+
 
 # ---------------------------------------------------------------------------
 # Queue Definitions & Routing Rules (Dedicated Queues)
@@ -1391,3 +1409,314 @@ if "app.tasks.auto_requeue_dlq" not in celery_app.tasks:
     logging.getLogger(__name__).warning(
         "app.tasks.auto_requeue_dlq is not registered with celery_app"
     )
+
+
+# ---------------------------------------------------------------------------
+# Redis Failure Handling Re-exports (Story: Add Redis failure handling)
+# ---------------------------------------------------------------------------
+
+from app.redis_client import (
+    DEFAULT_REDIS_FAILURE_HANDLING_CONFIG,
+    add_redis_failure_handling,
+    get_redis_failure_handling_config,
+    check_redis_health,
+    execute_with_safe_fallback,
+    AddRedisFailureHandling,
+    Add_redis_failure_handling,
+    get_redis_failure_handling_status,
+    get_redis_fallback_mode,
+)
+
+
+# ---------------------------------------------------------------------------
+# Redis Backup Strategy Re-exports (Story: Add Redis backup strategy)
+# ---------------------------------------------------------------------------
+
+from app.redis_client import (
+    DEFAULT_REDIS_BACKUP_CONFIG,
+    add_redis_backup_strategy,
+    get_redis_backup_config,
+    classify_redis_key,
+    validate_redis_restore_safety,
+    AddRedisBackupStrategy,
+    Add_redis_backup_strategy,
+    get_redis_backup_strategy,
+    get_redis_backup_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# Redis Memory Monitoring Re-exports (Story: Monitor Redis memory usage)
+# ---------------------------------------------------------------------------
+
+from app.redis_client import (
+    DEFAULT_REDIS_MEMORY_MONITORING_CONFIG,
+    monitor_redis_memory_usage,
+    get_redis_memory_metrics,
+    evaluate_redis_memory_pressure,
+    get_redis_memory_monitoring_config,
+    MonitorRedisMemoryUsage,
+    Monitor_redis_memory_usage,
+    get_redis_memory_monitoring_status,
+    get_redis_memory_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# Redis Connection Monitoring Re-exports (Story: Monitor Redis connection usage)
+# ---------------------------------------------------------------------------
+
+from app.redis_client import (
+    DEFAULT_REDIS_CONNECTION_MONITORING_CONFIG,
+    monitor_redis_connection_usage,
+    get_redis_connection_metrics,
+    evaluate_redis_connection_pressure,
+    get_redis_connection_monitoring_config,
+    MonitorRedisConnectionUsage,
+    Monitor_redis_connection_usage,
+    get_redis_connection_monitoring_status,
+    get_redis_connection_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# Redis Recovery Testing Re-exports (Story: Test Redis recovery)
+# ---------------------------------------------------------------------------
+
+from app.redis_client import (
+    DEFAULT_REDIS_RECOVERY_TEST_CONFIG,
+    test_redis_recovery,
+    run_redis_recovery_simulation,
+    get_redis_recovery_config,
+    TestRedisRecovery,
+    Test_redis_recovery,
+    get_redis_recovery_status,
+    get_redis_recovery_test_results,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Connect Kafka Events to WebSocket Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.kafka_to_websocket_bridge import (
+    DEFAULT_KAFKA_TO_WEBSOCKET_CONFIG,
+    KAFKA_TO_WEBSOCKET_EVENT_MAP,
+    map_kafka_event_to_websocket,
+    connect_kafka_events_to_websocket,
+    get_kafka_to_websocket_config,
+    KafkaToWebSocketBridge,
+    bridge_kafka_event_to_websocket,
+    ConnectKafkaEventsToWebSocket,
+    Connect_kafka_events_to_websocket,
+    get_kafka_to_websocket_status,
+    get_websocket_bridge_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Job Status Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.job_status_broadcaster import (
+    DEFAULT_JOB_STATUS_UPDATE_CONFIG,
+    send_job_status_updates,
+    get_job_status_update_config,
+    JobStatusUpdateBroadcaster,
+    SendJobStatusUpdates,
+    Send_job_status_updates,
+    broadcast_job_status_update,
+    get_job_status_update_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Technician Location Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.technician_location_broadcaster import (
+    DEFAULT_TECHNICIAN_LOCATION_CONFIG,
+    send_technician_location_updates,
+    get_technician_location_config,
+    TechnicianLocationBroadcaster,
+    SendTechnicianLocationUpdates,
+    Send_technician_location_updates,
+    broadcast_technician_location_update,
+    get_technician_location_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Dispatch Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.dispatch_update_broadcaster import (
+    DEFAULT_DISPATCH_UPDATE_CONFIG,
+    send_dispatch_updates,
+    get_dispatch_update_config,
+    DispatchUpdateBroadcaster,
+    SendDispatchUpdates,
+    Send_dispatch_updates,
+    broadcast_dispatch_update,
+    get_dispatch_update_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send SLA Alerts Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.sla_alert_broadcaster import (
+    DEFAULT_SLA_ALERT_CONFIG,
+    VALID_SEVERITIES,
+    send_sla_alerts,
+    get_sla_alert_config,
+    SLAAlertBroadcaster,
+    SendSLAAlerts,
+    Send_sla_alerts,
+    broadcast_sla_alert,
+    get_sla_alert_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Notification Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.notification_update_broadcaster import (
+    DEFAULT_NOTIFICATION_UPDATE_CONFIG,
+    VALID_NOTIFICATION_STATUSES,
+    send_notification_updates,
+    get_notification_update_config,
+    NotificationUpdateBroadcaster,
+    SendNotificationUpdates,
+    Send_notification_updates,
+    broadcast_notification_update,
+    get_notification_update_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Payment Updates Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.payment_update_broadcaster import (
+    DEFAULT_PAYMENT_UPDATE_CONFIG,
+    VALID_PAYMENT_STATUSES,
+    send_payment_updates,
+    get_payment_update_config,
+    PaymentUpdateBroadcaster,
+    SendPaymentUpdates,
+    Send_payment_updates,
+    broadcast_payment_update,
+    get_payment_update_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Handle Reconnection Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_reconnection_service import (
+    DEFAULT_RECONNECTION_CONFIG,
+    RECOVERY_WINDOW_SECONDS,
+    handle_websocket_reconnection,
+    get_reconnection_config,
+    get_reconnection_status,
+    WebSocketReconnectionService,
+    HandleWebSocketReconnection,
+    Handle_websocket_reconnection,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Handle WebSocket Failures Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_failure_service import (
+    DEFAULT_FAILURE_HANDLING_CONFIG,
+    VALID_FAILURE_STATUSES,
+    handle_websocket_failures,
+    get_websocket_failure_config,
+    WebSocketFailureService,
+    HandleWebSocketFailures,
+    Handle_websocket_failures,
+    get_websocket_failure_status,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Connection Authentication Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_auth_service import (
+    DEFAULT_WEBSOCKET_AUTH_CONFIG,
+    validate_connection_authentication,
+    get_websocket_auth_config,
+    get_websocket_auth_status,
+    WebSocketAuthService,
+    AddConnectionAuthentication,
+    Add_connection_authentication,
+    ValidateConnectionAuthentication,
+    Validate_connection_authentication,
+    get_connection_auth_status,
+    get_connection_auth_config,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Tenant-Based Event Filtering Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_tenant_filter import (
+    DEFAULT_TENANT_FILTER_CONFIG,
+    TENANT_ROOM_PREFIX,
+    CANONICAL_TENANT_REQUIRED_EVENTS,
+    TenantEventFilterError,
+    InvalidTenantEventError,
+    CrossTenantEventError,
+    is_valid_tenant_id,
+    format_tenant_room,
+    format_tenant_scoped_room,
+    extract_tenant_from_room,
+    validate_event_tenant,
+    filter_tenant_events,
+    get_tenant_filter_config,
+    get_tenant_filter_status,
+    TenantEventFilterService,
+    AddTenantBasedEventFiltering,
+    Add_tenant_based_event_filtering,
+    FilterTenantEvents,
+    Filter_tenant_events,
+    validate_tenant_event_filter,
+    get_tenant_filtering_status,
+    get_tenant_filtering_config,
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Test Concurrent Connections Re-exports
+# ---------------------------------------------------------------------------
+
+from app.services.websocket_reconnection_service import (
+    CONCURRENT_CONNECTION_SCENARIOS,
+    DEFAULT_CONCURRENT_CONNECTIONS_CONFIG,
+    ConcurrentConnectionsTester,
+    test_concurrent_connections,
+    run_concurrent_connections_simulation,
+    get_concurrent_connections_config,
+    TestConcurrentConnections,
+    Test_concurrent_connections,
+    get_concurrent_connections_status,
+    get_concurrent_connections_test_results,
+)
+
+
+
+
+
+
+
+
+
+

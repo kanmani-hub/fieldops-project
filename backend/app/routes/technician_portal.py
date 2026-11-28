@@ -3462,6 +3462,62 @@ async def complete_job(
             chat_customer_id,
         )
 
+    # Publish job completion & invoice generation events to Kafka
+    try:
+        kafka_producer = getattr(request.app.state, "kafka_producer", None)
+        if kafka_producer is not None:
+            from app.services.ai.FieldOpsAI.schemas.agent_messages import (
+                AgentAddress,
+                MessageEnvelope,
+                MessageType,
+            )
+            # 1. Publish job-completed event to fieldops.job.events
+            completed_event = MessageEnvelope(
+                sender=AgentAddress(
+                    agent_type="technician",
+                    agent_id=str(tech.tech_id or tech.technician_id),
+                    tenant_id=str(job.tenant_id),
+                ),
+                message_type=MessageType.EVENT,
+                payload={
+                    "event_type": "job-completed",
+                    "event_id": f"evt_completed_{job.id}",
+                    "job_id": str(job.id),
+                    "tenant_id": str(job.tenant_id),
+                    "technician_id": str(tech.technician_id),
+                    "schema_version": 1,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                topic="fieldops.job.events",
+            )
+            await kafka_producer.publish(completed_event)
+
+            # 2. Publish invoice event to Kafka
+            from app.services.invoice_event_producer import InvoiceEventProducer
+            invoice_producer = InvoiceEventProducer(kafka_producer, topic="fieldops.billing.events")
+            await invoice_producer.publish(
+                event_type="INVOICE_GENERATED",
+                event_id=f"evt_invoice_{closure_record.id}_{job.id}",
+                job_id=str(job.id),
+                tenant_id=str(job.tenant_id),
+                invoice_id=str(closure_record.id),
+                payload={
+                    "invoice_id": str(closure_record.id),
+                    "job_id": str(job.id),
+                    "technician_id": str(tech.technician_id),
+                    "subtotal": float(subtotal),
+                    "labour_cost": float(labour_cost),
+                    "material_cost": float(material_cost),
+                    "gst_amount": float(gst_amount),
+                    "total_amount": float(total_amount),
+                    "amount": float(total_amount),
+                    "payment_method": payment_method,
+                    "status": "COMPLETED",
+                },
+            )
+    except Exception as exc:
+        logger.warning("Failed to publish completion/invoice Kafka events: %s", exc)
+
     return {"message": "Job completed", "job_id": job_id, "status": "COMPLETED"}
 
 # ──────────────────────────────────────────────────

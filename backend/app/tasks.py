@@ -3924,6 +3924,952 @@ from app.celery_app import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Review Redis Key Structure Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.review_redis_key_structure_task",
+)
+def review_redis_key_structure_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to review and standardize Redis key namespaces."""
+    from app.redis_client import review_redis_key_structure
+    return review_redis_key_structure()
+
+
+from app.redis_client import (
+    REDIS_KEY_NAMESPACES,
+    DEFAULT_REDIS_KEY_REVIEW,
+    REDIS_KEY_INVENTORY,
+    build_redis_key,
+    build_tenant_key,
+    parse_redis_key,
+    review_redis_key_structure,
+    get_redis_key_inventory,
+    identify_keys_for_migration,
+    ReviewRedisKeyStructure,
+    Review_redis_key_structure,
+    get_redis_key_structure_review,
+    get_redis_namespaces,
+)
+
+ReviewRedisKeyStructureTask = review_redis_key_structure_task
+Review_redis_key_structure_task = review_redis_key_structure_task
+
+
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Configure Redis Expiration Rules Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.configure_redis_expiration_rules_task",
+)
+def configure_redis_expiration_rules_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    policy_updates: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Celery task to configure and enforce Redis expiration rules."""
+    from app.redis_client import configure_redis_expiration_rules
+    return configure_redis_expiration_rules(policy_updates=policy_updates)
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_EXPIRATION_CONFIG,
+    DEFAULT_REDIS_EXPIRATION_RULES,
+    PROTECTED_DURABLE_PATTERNS,
+    is_durable_record,
+    get_effective_ttl,
+    get_expiration_rule,
+    configure_redis_expiration_rules,
+    get_redis_expiration_config,
+    apply_expiration,
+    refresh_expiration,
+    ConfigureRedisExpirationRules,
+    Configure_redis_expiration_rules,
+    get_redis_expiration_rules,
+    get_redis_ttl_config,
+)
+
+ConfigureRedisExpirationRulesTask = configure_redis_expiration_rules_task
+Configure_redis_expiration_rules_task = configure_redis_expiration_rules_task
+
+
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Improve Distributed Locks Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.improve_distributed_locks_task",
+)
+def improve_distributed_locks_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and activate hardened distributed locks."""
+    from app.redis_client import improve_distributed_locks
+    return improve_distributed_locks()
+
+
+from app.redis_client import (
+    DEFAULT_DISTRIBUTED_LOCK_CONFIG,
+    acquire_distributed_lock,
+    release_distributed_lock,
+    extend_distributed_lock,
+    is_lock_held,
+    with_distributed_lock,
+    improve_distributed_locks,
+    get_distributed_lock_config,
+    ImproveDistributedLocks,
+    Improve_distributed_locks,
+    get_lock_strategy,
+    get_distributed_lock_status,
+)
+
+ImproveDistributedLocksTask = improve_distributed_locks_task
+Improve_distributed_locks_task = improve_distributed_locks_task
+
+
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Add Redis Cache for Frequent Queries Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.add_redis_cache_for_frequent_queries_task",
+)
+def add_redis_cache_for_frequent_queries_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and activate frequent query read-through cache."""
+    from app.redis_client import add_redis_cache_for_frequent_queries
+    return add_redis_cache_for_frequent_queries()
+
+
+from app.redis_client import (
+    DEFAULT_FREQUENT_QUERY_CACHE_CONFIG,
+    build_query_cache_key,
+    get_or_set_cached_query,
+    invalidate_query_cache,
+    add_redis_cache_for_frequent_queries,
+    get_query_cache_config,
+    AddRedisCacheForFrequentQueries,
+    Add_redis_cache_for_frequent_queries,
+    get_frequent_query_cache_config,
+    get_query_cache_strategy,
+)
+
+AddRedisCacheForFrequentQueriesTask = add_redis_cache_for_frequent_queries_task
+Add_redis_cache_for_frequent_queries_task = add_redis_cache_for_frequent_queries_task
+
+
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Add Redis Cache Invalidation Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.add_redis_cache_invalidation_task",
+)
+def add_redis_cache_invalidation_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and activate write-invalidate cache policy."""
+    from app.redis_client import add_redis_cache_invalidation
+    return add_redis_cache_invalidation()
+
+
+from app.redis_client import (
+    DEFAULT_CACHE_INVALIDATION_CONFIG,
+    ENTITY_CACHE_MAP,
+    invalidate_cache_on_write,
+    invalidate_job_cache,
+    invalidate_technician_cache,
+    invalidate_catalog_cache,
+    invalidate_customer_cache,
+    add_redis_cache_invalidation,
+    get_cache_invalidation_config,
+    AddRedisCacheInvalidation,
+    Add_redis_cache_invalidation,
+    get_cache_invalidation_status,
+    get_invalidation_strategy,
+)
+
+AddRedisCacheInvalidationTask = add_redis_cache_invalidation_task
+Add_redis_cache_invalidation_task = add_redis_cache_invalidation_task
+
+
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Add Redis Failure Handling Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.add_redis_failure_handling_task",
+)
+def add_redis_failure_handling_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and activate Redis failure handling and degraded mode."""
+    from app.redis_client import add_redis_failure_handling
+    return add_redis_failure_handling()
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_FAILURE_HANDLING_CONFIG,
+    add_redis_failure_handling,
+    get_redis_failure_handling_config,
+    check_redis_health,
+    execute_with_safe_fallback,
+    AddRedisFailureHandling,
+    Add_redis_failure_handling,
+    get_redis_failure_handling_status,
+    get_redis_fallback_mode,
+)
+
+AddRedisFailureHandlingTask = add_redis_failure_handling_task
+Add_redis_failure_handling_task = add_redis_failure_handling_task
+
+
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Add Redis Backup Strategy Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.add_redis_backup_strategy_task",
+)
+def add_redis_backup_strategy_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and document Redis backup strategy."""
+    from app.redis_client import add_redis_backup_strategy
+    return add_redis_backup_strategy()
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_BACKUP_CONFIG,
+    add_redis_backup_strategy,
+    get_redis_backup_config,
+    classify_redis_key,
+    validate_redis_restore_safety,
+    AddRedisBackupStrategy,
+    Add_redis_backup_strategy,
+    get_redis_backup_strategy,
+    get_redis_backup_status,
+)
+
+AddRedisBackupStrategyTask = add_redis_backup_strategy_task
+Add_redis_backup_strategy_task = add_redis_backup_strategy_task
+
+
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Monitor Redis Memory Usage Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.monitor_redis_memory_usage_task",
+)
+def monitor_redis_memory_usage_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to monitor Redis memory consumption, limit, and evictions."""
+    from app.redis_client import monitor_redis_memory_usage
+    return monitor_redis_memory_usage()
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_MEMORY_MONITORING_CONFIG,
+    monitor_redis_memory_usage,
+    get_redis_memory_metrics,
+    evaluate_redis_memory_pressure,
+    get_redis_memory_monitoring_config,
+    MonitorRedisMemoryUsage,
+    Monitor_redis_memory_usage,
+    get_redis_memory_monitoring_status,
+    get_redis_memory_status,
+)
+
+MonitorRedisMemoryUsageTask = monitor_redis_memory_usage_task
+Monitor_redis_memory_usage_task = monitor_redis_memory_usage_task
+
+
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Monitor Redis Connection Usage Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.monitor_redis_connection_usage_task",
+)
+def monitor_redis_connection_usage_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to monitor Redis connection usage, pool pressure, and connection errors."""
+    from app.redis_client import monitor_redis_connection_usage
+    return monitor_redis_connection_usage()
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_CONNECTION_MONITORING_CONFIG,
+    monitor_redis_connection_usage,
+    get_redis_connection_metrics,
+    evaluate_redis_connection_pressure,
+    get_redis_connection_monitoring_config,
+    MonitorRedisConnectionUsage,
+    Monitor_redis_connection_usage,
+    get_redis_connection_monitoring_status,
+    get_redis_connection_status,
+)
+
+MonitorRedisConnectionUsageTask = monitor_redis_connection_usage_task
+Monitor_redis_connection_usage_task = monitor_redis_connection_usage_task
+
+
+# ---------------------------------------------------------------------------
+# Redis Enhancement: Test Redis Recovery Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.test_redis_recovery_task",
+)
+def test_redis_recovery_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and document Redis recovery scenarios."""
+    from app.redis_client import test_redis_recovery
+    return test_redis_recovery()
+
+
+from app.redis_client import (
+    DEFAULT_REDIS_RECOVERY_TEST_CONFIG,
+    test_redis_recovery,
+    run_redis_recovery_simulation,
+    get_redis_recovery_config,
+    TestRedisRecovery,
+    Test_redis_recovery,
+    get_redis_recovery_status,
+    get_redis_recovery_test_results,
+)
+
+TestRedisRecoveryTask = test_redis_recovery_task
+Test_redis_recovery_task = test_redis_recovery_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Connect Kafka Events to WebSocket Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.connect_kafka_events_to_websocket_task",
+)
+def connect_kafka_events_to_websocket_task(
+    tenant_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Celery task to verify and document Kafka-to-WebSocket connection contract."""
+    from app.services.kafka_to_websocket_bridge import connect_kafka_events_to_websocket
+    return connect_kafka_events_to_websocket()
+
+
+from app.services.kafka_to_websocket_bridge import (
+    DEFAULT_KAFKA_TO_WEBSOCKET_CONFIG,
+    KAFKA_TO_WEBSOCKET_EVENT_MAP,
+    map_kafka_event_to_websocket,
+    connect_kafka_events_to_websocket,
+    get_kafka_to_websocket_config,
+    KafkaToWebSocketBridge,
+    bridge_kafka_event_to_websocket,
+    ConnectKafkaEventsToWebSocket,
+    Connect_kafka_events_to_websocket,
+    get_kafka_to_websocket_status,
+    get_websocket_bridge_status,
+)
+
+ConnectKafkaEventsToWebSocketTask = connect_kafka_events_to_websocket_task
+Connect_kafka_events_to_websocket_task = connect_kafka_events_to_websocket_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Job Status Updates Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_job_status_updates_task",
+)
+def send_job_status_updates_task(
+    job_id: Union[str, int] = "123",
+    status: str = "ASSIGNED",
+    tenant_id: Union[str, int] = "tenant-1",
+    old_status: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    technician_id: Optional[Union[str, int]] = None,
+    technician_name: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    schema_version: int = 1,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative job status update to WebSocket clients."""
+    from app.services.job_status_broadcaster import send_job_status_updates
+    return send_job_status_updates(
+        job_id=job_id,
+        status=status,
+        tenant_id=tenant_id,
+        old_status=old_status,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        technician_id=technician_id,
+        technician_name=technician_name,
+        timestamp=timestamp,
+        schema_version=schema_version,
+    )
+
+
+from app.services.job_status_broadcaster import (
+    DEFAULT_JOB_STATUS_UPDATE_CONFIG,
+    send_job_status_updates,
+    get_job_status_update_config,
+    JobStatusUpdateBroadcaster,
+    SendJobStatusUpdates,
+    Send_job_status_updates,
+    broadcast_job_status_update,
+    get_job_status_update_status,
+)
+
+SendJobStatusUpdatesTask = send_job_status_updates_task
+Send_job_status_updates_task = send_job_status_updates_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Technician Location Updates Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_technician_location_updates_task",
+)
+def send_technician_location_updates_task(
+    technician_id: Union[str, int] = "tech-1",
+    latitude: float = 0.0,
+    longitude: float = 0.0,
+    tenant_id: Union[str, int] = "tenant-1",
+    job_id: Optional[Union[str, int]] = None,
+    accuracy: Optional[float] = None,
+    altitude: Optional[float] = None,
+    speed: Optional[float] = None,
+    heading: Optional[float] = None,
+    timestamp: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    force_broadcast: bool = False,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative technician location update to WebSocket clients."""
+    from app.services.technician_location_broadcaster import send_technician_location_updates
+    return send_technician_location_updates(
+        technician_id=technician_id,
+        latitude=latitude,
+        longitude=longitude,
+        tenant_id=tenant_id,
+        job_id=job_id,
+        accuracy=accuracy,
+        altitude=altitude,
+        speed=speed,
+        heading=heading,
+        timestamp=timestamp,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        force_broadcast=force_broadcast,
+    )
+
+
+from app.services.technician_location_broadcaster import (
+    DEFAULT_TECHNICIAN_LOCATION_CONFIG,
+    send_technician_location_updates,
+    get_technician_location_config,
+    TechnicianLocationBroadcaster,
+    SendTechnicianLocationUpdates,
+    Send_technician_location_updates,
+    broadcast_technician_location_update,
+    get_technician_location_status,
+)
+
+SendTechnicianLocationUpdatesTask = send_technician_location_updates_task
+Send_technician_location_updates_task = send_technician_location_updates_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Dispatch Updates Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_dispatch_updates_task",
+)
+def send_dispatch_updates_task(
+    job_id: Union[str, int] = "123",
+    assignment_id: Union[str, int] = "456",
+    tenant_id: Union[str, int] = "tenant-1",
+    technician_id: Optional[Union[str, int]] = None,
+    technician_name: Optional[str] = None,
+    previous_technician_id: Optional[Union[str, int]] = None,
+    dispatch_action: str = "ASSIGNED",
+    status: str = "ASSIGNED",
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    schema_version: int = 1,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative dispatch update to WebSocket clients."""
+    from app.services.dispatch_update_broadcaster import send_dispatch_updates
+    return send_dispatch_updates(
+        job_id=job_id,
+        assignment_id=assignment_id,
+        tenant_id=tenant_id,
+        technician_id=technician_id,
+        technician_name=technician_name,
+        previous_technician_id=previous_technician_id,
+        dispatch_action=dispatch_action,
+        status=status,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        timestamp=timestamp,
+        schema_version=schema_version,
+    )
+
+
+from app.services.dispatch_update_broadcaster import (
+    DEFAULT_DISPATCH_UPDATE_CONFIG,
+    send_dispatch_updates,
+    get_dispatch_update_config,
+    DispatchUpdateBroadcaster,
+    SendDispatchUpdates,
+    Send_dispatch_updates,
+    broadcast_dispatch_update,
+    get_dispatch_update_status,
+)
+
+SendDispatchUpdatesTask = send_dispatch_updates_task
+Send_dispatch_updates_task = send_dispatch_updates_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send SLA Alerts Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_sla_alerts_task",
+)
+def send_sla_alerts_task(
+    job_id: Union[str, int] = "123",
+    severity: str = "AT_RISK",
+    tenant_id: Union[str, int] = "tenant-1",
+    sla_type: str = "RESPONSE",
+    time_remaining_seconds: Optional[Union[int, float]] = None,
+    target_time: Optional[str] = None,
+    deadline: Optional[str] = None,
+    customer_tier: str = "STANDARD",
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    schema_version: int = 1,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative SLA alerts to WebSocket clients."""
+    from app.services.sla_alert_broadcaster import send_sla_alerts
+    return send_sla_alerts(
+        job_id=job_id,
+        severity=severity,
+        tenant_id=tenant_id,
+        sla_type=sla_type,
+        time_remaining_seconds=time_remaining_seconds,
+        target_time=target_time,
+        deadline=deadline,
+        customer_tier=customer_tier,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        timestamp=timestamp,
+        schema_version=schema_version,
+    )
+
+
+from app.services.sla_alert_broadcaster import (
+    DEFAULT_SLA_ALERT_CONFIG,
+    VALID_SEVERITIES,
+    send_sla_alerts,
+    get_sla_alert_config,
+    SLAAlertBroadcaster,
+    SendSLAAlerts,
+    Send_sla_alerts,
+    broadcast_sla_alert,
+    get_sla_alert_status,
+)
+
+SendSLAAlertsTask = send_sla_alerts_task
+Send_sla_alerts_task = send_sla_alerts_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Notification Updates Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_notification_updates_task",
+)
+def send_notification_updates_task(
+    notification_id: Union[str, int] = "n-1",
+    status: str = "SENT",
+    tenant_id: Union[str, int] = "tenant-1",
+    channel: Optional[str] = "EMAIL",
+    recipient: Optional[str] = None,
+    recipient_id: Optional[Union[str, int]] = None,
+    attempt: int = 1,
+    job_id: Optional[Union[str, int]] = None,
+    error_reason: Optional[str] = None,
+    provider_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    schema_version: int = 1,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative notification lifecycle update to WebSocket clients."""
+    from app.services.notification_update_broadcaster import send_notification_updates
+    return send_notification_updates(
+        notification_id=notification_id,
+        status=status,
+        tenant_id=tenant_id,
+        channel=channel,
+        recipient=recipient,
+        recipient_id=recipient_id,
+        attempt=attempt,
+        job_id=job_id,
+        error_reason=error_reason,
+        provider_id=provider_id,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        timestamp=timestamp,
+        schema_version=schema_version,
+    )
+
+
+from app.services.notification_update_broadcaster import (
+    DEFAULT_NOTIFICATION_UPDATE_CONFIG,
+    VALID_NOTIFICATION_STATUSES,
+    send_notification_updates,
+    get_notification_update_config,
+    NotificationUpdateBroadcaster,
+    SendNotificationUpdates,
+    Send_notification_updates,
+    broadcast_notification_update,
+    get_notification_update_status,
+)
+
+SendNotificationUpdatesTask = send_notification_updates_task
+Send_notification_updates_task = send_notification_updates_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Send Payment Updates Celery Task & Wrappers
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.send_payment_updates_task",
+)
+def send_payment_updates_task(
+    invoice_id: Union[str, int] = "10001",
+    payment_status: str = "PAID",
+    tenant_id: Union[str, int] = "tenant-1",
+    status: Optional[str] = None,
+    payment_id: Optional[Union[str, int]] = None,
+    job_id: Optional[Union[str, int]] = None,
+    customer_id: Optional[Union[str, int]] = None,
+    amount: Optional[Union[int, float, str]] = None,
+    currency: str = "USD",
+    payment_method: Optional[str] = None,
+    error_reason: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    schema_version: int = 1,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to broadcast authoritative payment update to WebSocket clients."""
+    from app.services.payment_update_broadcaster import send_payment_updates
+    return send_payment_updates(
+        invoice_id=invoice_id,
+        payment_status=payment_status,
+        tenant_id=tenant_id,
+        status=status,
+        payment_id=payment_id,
+        job_id=job_id,
+        customer_id=customer_id,
+        amount=amount,
+        currency=currency,
+        payment_method=payment_method,
+        error_reason=error_reason,
+        correlation_id=correlation_id,
+        event_id=event_id,
+        timestamp=timestamp,
+        schema_version=schema_version,
+    )
+
+
+from app.services.payment_update_broadcaster import (
+    DEFAULT_PAYMENT_UPDATE_CONFIG,
+    VALID_PAYMENT_STATUSES,
+    send_payment_updates,
+    get_payment_update_config,
+    PaymentUpdateBroadcaster,
+    SendPaymentUpdates,
+    Send_payment_updates,
+    broadcast_payment_update,
+    get_payment_update_status,
+)
+
+SendPaymentUpdatesTask = send_payment_updates_task
+Send_payment_updates_task = send_payment_updates_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Handle WebSocket Reconnection Celery Task
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.handle_websocket_reconnection_task",
+)
+def handle_websocket_reconnection_task(
+    tenant_id: Union[str, int] = "tenant-1",
+    socket_id: Optional[str] = None,
+    last_event_id: Optional[str] = None,
+    recovered: bool = True,
+    disconnected_at: Optional[float] = None,
+    status: Optional[str] = None,
+    namespace: Optional[str] = None,
+    recovery_window_seconds: Optional[int] = None,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to evaluate and process WebSocket client reconnection/recovery."""
+    from app.services.websocket_reconnection_service import handle_websocket_reconnection
+    return handle_websocket_reconnection(
+        tenant_id=tenant_id,
+        socket_id=socket_id,
+        last_event_id=last_event_id,
+        recovered=recovered,
+        disconnected_at=disconnected_at,
+        status=status,
+        namespace=namespace,
+        recovery_window_seconds=recovery_window_seconds,
+    )
+
+
+from app.services.websocket_reconnection_service import (
+    DEFAULT_RECONNECTION_CONFIG,
+    RECOVERY_WINDOW_SECONDS,
+    handle_websocket_reconnection,
+    get_reconnection_config,
+    get_reconnection_status,
+    WebSocketReconnectionService,
+    HandleWebSocketReconnection,
+    Handle_websocket_reconnection,
+)
+
+HandleWebSocketReconnectionTask = handle_websocket_reconnection_task
+Handle_websocket_reconnection_task = handle_websocket_reconnection_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Handle WebSocket Failures Celery Task
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.handle_websocket_failures_task",
+)
+def handle_websocket_failures_task(
+    status: str = "DEGRADED_OR_RECOVERED",
+    failure_handling: str = "ENABLED",
+    error_type: Optional[str] = None,
+    raw_payload: Optional[Union[str, dict]] = None,
+    tenant_id: Optional[str] = None,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to evaluate and process WebSocket failure isolation and recovery."""
+    from app.services.websocket_failure_service import handle_websocket_failures
+    return handle_websocket_failures(
+        status=status,
+        failure_handling=failure_handling,
+        error_type=error_type,
+        raw_payload=raw_payload,
+        tenant_id=tenant_id,
+    )
+
+
+from app.services.websocket_failure_service import (
+    DEFAULT_FAILURE_HANDLING_CONFIG,
+    VALID_FAILURE_STATUSES,
+    handle_websocket_failures,
+    get_websocket_failure_config,
+    WebSocketFailureService,
+    HandleWebSocketFailures,
+    Handle_websocket_failures,
+    get_websocket_failure_status,
+)
+
+HandleWebSocketFailuresTask = handle_websocket_failures_task
+Handle_websocket_failures_task = handle_websocket_failures_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Connection Authentication Celery Task
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.validate_connection_authentication_task",
+)
+def validate_connection_authentication_task(
+    token: Optional[str] = None,
+    tenant_id: Optional[Union[str, int]] = None,
+    role: Optional[str] = None,
+    allow_fallback: bool = True,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to validate WebSocket connection credentials and claims."""
+    from app.services.websocket_auth_service import validate_connection_authentication
+    return validate_connection_authentication(
+        token=token,
+        tenant_id=tenant_id,
+        role=role,
+        allow_fallback=allow_fallback,
+    )
+
+
+from app.services.websocket_auth_service import (
+    DEFAULT_WEBSOCKET_AUTH_CONFIG,
+    validate_connection_authentication,
+    get_websocket_auth_config,
+    get_websocket_auth_status,
+    WebSocketAuthService,
+    AddConnectionAuthentication,
+    Add_connection_authentication,
+    ValidateConnectionAuthentication,
+    Validate_connection_authentication,
+    get_connection_auth_status,
+    get_connection_auth_config,
+)
+
+ValidateConnectionAuthenticationTask = validate_connection_authentication_task
+Validate_connection_authentication_task = validate_connection_authentication_task
+AddConnectionAuthenticationTask = validate_connection_authentication_task
+Add_connection_authentication_task = validate_connection_authentication_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Add Tenant-Based Event Filtering Celery Task
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.filter_tenant_events_task",
+)
+def filter_tenant_events_task(
+    event_payload: Optional[dict] = None,
+    socket_tenant_id: Optional[Union[str, int]] = None,
+    target_room: Optional[str] = None,
+    allow_cross_tenant_scope: bool = False,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to validate and filter outbound WebSocket events by tenant and scope."""
+    from app.services.websocket_tenant_filter import filter_tenant_events
+    return filter_tenant_events(
+        event_payload=event_payload,
+        socket_tenant_id=socket_tenant_id,
+        target_room=target_room,
+        allow_cross_tenant_scope=allow_cross_tenant_scope,
+    )
+
+
+from app.services.websocket_tenant_filter import (
+    DEFAULT_TENANT_FILTER_CONFIG,
+    TENANT_ROOM_PREFIX,
+    CANONICAL_TENANT_REQUIRED_EVENTS,
+    is_valid_tenant_id,
+    format_tenant_room,
+    format_tenant_scoped_room,
+    extract_tenant_from_room,
+    validate_event_tenant,
+    filter_tenant_events,
+    get_tenant_filter_config,
+    get_tenant_filter_status,
+    TenantEventFilterService,
+    AddTenantBasedEventFiltering,
+    Add_tenant_based_event_filtering,
+    FilterTenantEvents,
+    Filter_tenant_events,
+    validate_tenant_event_filter,
+    get_tenant_filtering_status,
+    get_tenant_filtering_config,
+)
+
+FilterTenantEventsTask = filter_tenant_events_task
+Filter_tenant_events_task = filter_tenant_events_task
+AddTenantBasedEventFilteringTask = filter_tenant_events_task
+Add_tenant_based_event_filtering_task = filter_tenant_events_task
+
+
+# ---------------------------------------------------------------------------
+# WebSocket Real-Time Events: Test Concurrent Connections Celery Task
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.test_concurrent_connections_task",
+)
+def test_concurrent_connections_task(
+    run_simulation: bool = False,
+    clients_per_tenant: int = 10,
+    tenant_count: int = 3,
+    events_per_tenant: int = 5,
+    **kwargs,
+) -> dict[str, Any]:
+    """Celery task to run or verify concurrent WebSocket connections scenarios."""
+    from app.services.websocket_reconnection_service import test_concurrent_connections
+    return test_concurrent_connections(
+        run_simulation=run_simulation,
+        clients_per_tenant=clients_per_tenant,
+        tenant_count=tenant_count,
+        events_per_tenant=events_per_tenant,
+    )
+
+
+from app.services.websocket_reconnection_service import (
+    CONCURRENT_CONNECTION_SCENARIOS,
+    DEFAULT_CONCURRENT_CONNECTIONS_CONFIG,
+    ConcurrentConnectionsTester,
+    test_concurrent_connections,
+    run_concurrent_connections_simulation,
+    get_concurrent_connections_config,
+    TestConcurrentConnections,
+    Test_concurrent_connections,
+    get_concurrent_connections_status,
+    get_concurrent_connections_test_results,
+)
+
+TestConcurrentConnectionsTask = test_concurrent_connections_task
+Test_concurrent_connections_task = test_concurrent_connections_task
+
+
+
+
+
+
+
+
+
+
+
 
 
 

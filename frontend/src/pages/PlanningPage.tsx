@@ -62,6 +62,8 @@ type DispatchRealtimeEvent = {
   tenant_id?: string | number;
   old_status?: string | null;
   new_status?: string | null;
+  status?: string | null;
+  event?: string | null;
   timestamp?: string;
   technician?: {
     tech_id?: string | number;
@@ -2099,11 +2101,19 @@ const fetchCompletedCount = async () => {
       "http://localhost:4000"
     ).replace(/\/$/, "");
 
+    const authToken =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem("token") ||
+          window.localStorage.getItem("access_token") ||
+          ""
+        : "";
+
     const socket = io(
       `${socketBaseUrl}/dispatch-dashboard`,
       {
         auth: {
           tenant_id: tenantId,
+          ...(authToken ? { token: authToken } : {}),
         },
         transports: ["websocket", "polling"],
         reconnection: true,
@@ -2122,6 +2132,14 @@ const fetchCompletedCount = async () => {
     const onConnect = () => {
       setDispatchSocketStatus("connected");
       setDispatchSocketError("");
+      if (socket.recovered) {
+        console.log("[WebSocket Recovery] State recovered successfully from connectionStateRecovery.");
+      } else {
+        console.log("[WebSocket Recovery] Non-recovered session or window elapsed; refreshing planning state.");
+        if (typeof fetchPlanningData === "function") {
+          fetchPlanningData();
+        }
+      }
     };
 
     const onDisconnect = (reason?: string) => {
@@ -2198,12 +2216,13 @@ const fetchCompletedCount = async () => {
         );
       }
 
+      const effectiveStatus = payload.new_status || payload.status || "";
       const eventKey = [
         eventName,
         jobKey,
         payload.timestamp || "",
         payload.old_status || "",
-        payload.new_status || "",
+        effectiveStatus,
         payload.technician?.tech_id ?? "",
       ].join("|");
 
